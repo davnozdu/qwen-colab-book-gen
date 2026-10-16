@@ -58,6 +58,9 @@ jobs:
             set -e
             colab version
             tmux -V
+            # Обёртка должна понимать ключи, которыми её зовёт бот: иначе задание упадёт на старте.
+            run-book --help | grep -q -- "--out-dir"
+            run-book --help | grep -q -- "--stop-on-failure"
             python3 --version
             python3 -m py_compile /opt/bot/bot.py /opt/bot/jobs.py /opt/bot/tgapi.py /opt/bot/colab_auth.py
             test -f /opt/qwen-epub-audiobook/colab/cli/run-book.py
