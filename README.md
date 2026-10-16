@@ -28,8 +28,8 @@ tmux для фоновых заданий, `attr` для ссылок Drive, и 
     cp .env.example .env         # впишите TELEGRAM_BOT_TOKEN (и, если нужно, TELEGRAM_CHAT_ID)
     docker compose up -d
 
-Если удобнее держать всё в одном файле — возьмите `compose-token.yaml`: там токен вписывается
-прямо в него, отдельный `.env` не нужен.
+Если удобнее держать всё в одном файле — возьмите `compose-token.yaml`: там нет внешних
+переменных, все значения вписаны прямо в файл (меняете только `TELEGRAM_BOT_TOKEN`).
 
     docker compose -f compose-token.yaml up -d
 
