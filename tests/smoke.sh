@@ -67,6 +67,9 @@ feed() {
     TG_STUB_URL="http://127.0.0.1:$PORT/_push" PAYLOAD="$1" python3 "$HERE/feed.py"
 }
 
+echo "--- проверяю логику бота (без сети) ---"
+if ! python3 "$HERE/check_logic.py"; then fail=1; fi
+
 echo "книга отправлена, жду сборку…"
 feed "{\"update_id\":1,\"message\":{\"message_id\":1,\"chat\":{\"id\":$CHAT},\"document\":{\"file_id\":\"F1\",\"file_name\":\"smoke.epub\",\"file_size\":2048}}}"
 sleep 4
@@ -92,6 +95,17 @@ fail=0
 TG_STATE="$STATE" python3 "$HERE/check_sent.py" || fail=1
 [ -f "$WORK/data/results/smoke.zip" ] || { echo "  ✗ архива нет в томе результатов"; fail=1; }
 
+echo "--- чужой чат: бот не обслуживает ---"
+feed "{\"update_id\":20,\"message\":{\"message_id\":20,\"chat\":{\"id\":999},\"text\":\"/help\"}}"
+feed "{\"update_id\":21,\"message\":{\"message_id\":21,\"chat\":{\"id\":999},\"document\":{\"file_id\":\"F9\",\"file_name\":\"chuzhaya.epub\",\"file_size\":2048}}}"
+sleep 6
+
+echo "--- вход в Colab: фраза вместо кода не должна ломать вход ---"
+feed "{\"update_id\":30,\"message\":{\"message_id\":30,\"chat\":{\"id\":$CHAT},\"text\":\"/login\"}}"
+sleep 8
+feed "{\"update_id\":31,\"message\":{\"message_id\":31,\"chat\":{\"id\":$CHAT},\"text\":\"привет, это не код\"}}"
+sleep 5
+
 echo "--- готовлю книги для проверки каталога ---"
 mkdir -p "$WORK/data/books"
 if [ "${RUN_LOCAL:-0}" = "1" ]; then
@@ -110,10 +124,10 @@ for line in texts:
         print(line['text'].split('/log ')[-1].strip())
         break
 ")
-feed "{\"update_id\":20,\"message\":{\"message_id\":20,\"chat\":{\"id\":$CHAT},\"text\":\"/repeat $SESSION\"}}"
+feed "{\"update_id\":40,\"message\":{\"message_id\":40,\"chat\":{\"id\":$CHAT},\"text\":\"/repeat $SESSION\"}}"
 sleep 3
 # Останавливаем, пока повтор ещё идёт, — иначе останавливать будет нечего.
-feed "{\"update_id\":21,\"message\":{\"message_id\":21,\"chat\":{\"id\":$CHAT},\"text\":\"/stop\"}}"
+feed "{\"update_id\":41,\"message\":{\"message_id\":41,\"chat\":{\"id\":$CHAT},\"text\":\"/stop\"}}"
 sleep 6
 
 echo "--- книга, на которой Colab отказывает (проверяем понятное объяснение) ---"
@@ -129,7 +143,7 @@ WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/run_via_web.py" limit.epub
 sleep 14
 
 echo "--- проверки после повтора и остановки ---"
-if ! TG_STATE="$STATE" python3 "$HERE/check_late.py"; then fail=1; fi
+if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/check_late.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:$WEB_PORT" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi

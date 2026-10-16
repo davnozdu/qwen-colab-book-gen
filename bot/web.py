@@ -162,10 +162,7 @@ class WebApp:
             payload = job.log_payload(_int(query.get("offset", ["0"])[0], 0))
             return 200, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode(), {}
         if method == "GET" and parsed.path.startswith("/log/"):
-            key = parsed.path[len("/log/"):].strip("/")
-            if key.endswith("/tail"):
-                key = key[:-len("/tail")]
-            job = self.jobs.by_id(key)
+            job = self.jobs.by_id(parsed.path[len("/log/"):].strip("/"))
             if job is None:
                 return 200, "text/plain; charset=utf-8", "нет такого задания".encode(), {}
             if "raw" in query or query.get("raw"):
@@ -340,8 +337,8 @@ class WebApp:
     def colab_card(self) -> str:
         state = {"signed_in": None, "url": "", "busy": False}
         if self.login is not None:
-            try:
-                state = getattr(self.login, "state")()
+            try:                                  # login может быть любым объектом с state()
+                state = getattr(self.login, "state")()   # noqa: B009
             except Exception as exc:
                 state = {"signed_in": None, "url": "", "busy": False, "error": str(exc)}
         if state.get("signed_in") is True:
@@ -526,11 +523,17 @@ def path_las(path: str) -> str:
 
 
 def list_files(folder: pathlib.Path) -> list:
-    """Файлы папки, свежие сверху (папки не показываем)."""
+    """Файлы папки, свежие сверху. Исчезнувшие по пути файлы просто пропускаем."""
     if not folder.is_dir():
         return []
-    return sorted((path for path in folder.iterdir() if path.is_file()),
-                  key=lambda path: path.stat().st_mtime, reverse=True)
+    files = []
+    for path in folder.iterdir():
+        try:
+            if path.is_file():
+                files.append((path.stat().st_mtime, path))
+        except OSError:                       # файл удалили прямо сейчас
+            continue
+    return [path for _, path in sorted(files, key=lambda item: item[0], reverse=True)]
 
 
 def page_slice(items: list, page: int) -> list:

@@ -191,6 +191,18 @@ class Jobs:
     def free_slot(self) -> bool:
         return len(self.live_running()) < self.max_jobs
 
+    def fail_stale_queued(self) -> int:
+        """На старте бота: задания, которые не успели запуститься, помечаем неудачными."""
+        fixed = 0
+        for job in self.load():
+            if job.status == "queued" and not self.alive(job):
+                job.meta.update({"status": "failed", "finished": time.time(),
+                                 "note": "Задание не запустилось (бот перезапускали). "
+                                         "Нажмите «повторить» или /repeat."})
+                job.save()
+                fixed += 1
+        return fixed
+
     @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
               max_hours: float = 7.0, extra: list | None = None) -> None:
@@ -219,7 +231,11 @@ class Jobs:
     # ────────────────────────────── состояние ──────────────────────────────
     def load(self) -> list:
         jobs = []
-        for path in sorted(self.jobs_dir.iterdir(), reverse=True):
+        try:
+            entries = sorted(self.jobs_dir.iterdir(), reverse=True)
+        except OSError:                      # каталог могли удалить вместе с томом
+            return jobs
+        for path in entries:
             if (path / "meta.json").exists():
                 try:
                     jobs.append(Job(path))
@@ -272,6 +288,12 @@ class Jobs:
         changed = {}
         for job in self.load():
             if job.status == "queued":          # ещё не запускалось: пусть решает очередь
+                if time.time() - float(job.meta.get("created") or 0) > 3600:
+                    job.meta.update({"status": "failed", "finished": time.time(),
+                                     "note": "Задание так и не запустилось (бот перезапускали). "
+                                             "Нажмите «повторить» или /repeat."})
+                    job.save()
+                    changed[job.id] = job
                 continue
             if job.status != "running":
                 continue

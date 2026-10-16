@@ -21,6 +21,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import threading
 import time
 
 import colab_auth
@@ -36,7 +37,7 @@ GPU = os.environ.get("GPU", "T4")
 DRIVE_DIR = os.environ.get("DRIVE_DIR", "Audiobooks-colab")
 SHRINK_HOURS = float(os.environ.get("SHRINK_HOURS", "7"))
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "1"))
-POLL = int(os.environ.get("POLL_SECONDS", "50"))
+POLL = int(os.environ.get("POLL_SECONDS", "10"))
 
 HELP = """Я собираю аудиокниги через Google Colab.
 
@@ -57,6 +58,24 @@ HELP = """Я собираю аудиокниги через Google Colab.
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
+
+
+def looks_like_code(text: str) -> bool:
+    """Код Google длинный (обычно 40+ знаков), без пробелов; «4/0...» тоже подходит."""
+    candidate = (text or "").strip()
+    return len(candidate) >= 20 and " " not in candidate and "\n" not in candidate
+
+
+def same_file(first: pathlib.Path, second: pathlib.Path) -> bool:
+    """Один и тот же файл? Сравниваем размер, затем содержимое (книги небольшие)."""
+    try:
+        if first.stat().st_size != second.stat().st_size:
+            return False
+        import hashlib
+        digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()   # noqa: E731
+        return digest(first) == digest(second)
+    except OSError:
+        return False
 
 
 class ColabLogin:
@@ -89,6 +108,10 @@ class ColabLogin:
                 "note": self.note or ("ждём код из браузера" if self.session else "")}
 
     def begin(self) -> str:
+        if self.session and self.session.expired():       # протухшую попытку закрываем
+            self.session.close()
+            self.session, self.url = None, ""
+            self.note = "прежняя попытка входа просрочена"
         if not self.session and self.login.terminal_logged_in():
             self.note = "вход есть"
             return "Вход в Colab уже есть — авторизоваться заново не нужно."
@@ -113,6 +136,10 @@ class ColabLogin:
     def submit(self, code: str) -> str:
         if not self.session:
             return "Сначала начните вход: /login (или кнопка «войти» на странице)."
+        if self.session.expired():
+            self.session.close()
+            self.session, self.url = None, ""
+            return "Прежняя попытка входа просрочена (прошло больше 15 минут). Начните заново: /login."
         session, self.session, self.url = self.session, None, ""
         session.submit_code(code)
         answer = session.wait_finish(120)
@@ -232,22 +259,29 @@ class App:
         text = (message.get("text") or "").strip()
         document = message.get("document") or {}
 
+        # Сначала пускаем только своих: чужой чат не должен трогать ни книги, ни вход в Colab.
+        if not self.allowed(chat_id):
+            self.bot.send(chat_id, "Это бот владельца, книги я не принимаю.")
+            return
+
         if text and not text.startswith("/") and self.colab.awaiting_code():
-            # Код авторизации принимаем при любом открытом входе: и после /login в чате,
-            # и после кнопки «войти» на странице — раньше второй случай терялся.
-            self.pending_login = None
-            print("[bot] получен код авторизации, отправляю его CLI", flush=True)
-            self.bot.send(chat_id, "Код принят, проверяю…")
-            self.bot.send(chat_id, self.colab.submit(text))
+            # Код авторизации принимаем при любом открытом входе (и после /login в чате, и после
+            # кнопки «войти» на странице). Но не всякий текст — иначе обычная фраза ломала вход.
+            if looks_like_code(text):
+                self.pending_login = None
+                print("[bot] получен код авторизации, отправляю его CLI", flush=True)
+                self.bot.send(chat_id, "Код принят, проверяю…")
+                self.in_background(chat_id, lambda: self.colab.submit(text), "Вход в Colab")
+            else:
+                self.bot.send(chat_id, "Это не похоже на код авторизации (он длинный, без пробелов). "
+                                       "Вход продолжается: пришлите код со страницы Google, "
+                                       "либо /login, чтобы получить ссылку заново.")
             return
         if text and not text.startswith("/") and ("4/" in text or len(text) > 40):
             # Похоже на код, но вход не начат — говорим об этом прямо, а не молчим.
             self.bot.send(chat_id, "Код сейчас некуда вставлять: вход не начат. "
                                    "Начните его — /login в чате или кнопка «войти» на странице, — "
                                    "а потом пришлите код со страницы Google.")
-            return
-        if not self.allowed(chat_id):
-            self.bot.send(chat_id, "Это бот владельца, книги я не принимаю.")
             return
         if text.startswith("/"):
             self.command(chat_id, text)
@@ -322,13 +356,16 @@ class App:
 
     def stop_job(self, chat_id, argument: str) -> None:
         if not argument:                                  # /stop без номера — остановить всё
-            self.bot.send(chat_id, self.stop_all_jobs())
+            self.bot.send(chat_id, "Останавливаю всё…")
+            self.in_background(chat_id, self.stop_all_jobs, "Остановка")
             return
         job = self.jobs.by_id(argument)
         if job is None:
             self.bot.send(chat_id, "Такого задания нет. /stop без номера остановит всё.")
             return
-        self.bot.send(chat_id, f"⏹ «{job.meta['name']}» остановлено.\n" + self.stop_one(job))
+        self.bot.send(chat_id, f"Останавливаю «{job.meta['name']}»…")
+        self.in_background(chat_id, lambda: f"⏹ «{job.meta['name']}» остановлено.\n" + self.stop_one(job),
+                           "Остановка")
 
     def stop_one(self, job) -> str:
         """Гасит задание и освобождает его машину Colab."""
@@ -377,27 +414,43 @@ class App:
         self.bot.send(chat_id, f"🔁 Повторяю сборку «{book.name}» — о ходе напишу.")
 
     def show_usage(self, chat_id) -> None:
-        self.bot.send(chat_id, self.colab.usage())
+        self.in_background(chat_id, self.colab.usage, "Остаток аккаунта")
 
     # ────────────────────────────── вход в Colab ──────────────────────────────
     def start_login(self, chat_id) -> None:
-        message = self.colab.begin()
-        self.pending_login = str(chat_id) if self.colab.session else None
-        self.bot.send(chat_id, message, preview=True)
+        """Вход запускаем в фоне: CLI отвечает не мгновенно, а чат ждать не должен."""
+        self.bot.send(chat_id, "Начинаю вход в Google Colab, ссылка придёт через несколько секунд…")
+        self.in_background(chat_id, self.colab.begin, "Вход в Colab")
 
     def finish_login(self, code: str) -> None:
-        self.bot.send(self.pending_login or "", self.colab.submit(code))
+        self.in_background(self.owner_chat(), lambda: self.colab.submit(code), "Вход в Colab")
 
     def owner_chat(self) -> str:
         """Кому писать: чат из настроек, иначе тот, кто первым написал боту."""
         return ((os.environ.get("TELEGRAM_CHAT_ID", "").split(",")[0].strip())
                 or (self.state.get("owner") or "").strip())
 
+    def in_background(self, chat_id, work, title: str) -> None:
+        """Долгие дела (вход, остаток, остановка) — в отдельном потоке: чат продолжает отвечать."""
+        def task():
+            try:
+                answer = work()
+            except Exception as exc:
+                answer = f"{title}: не вышло — {exc}"
+            if answer:
+                self.bot.send(chat_id, str(answer))
+        threading.Thread(target=task, name="bg", daemon=True).start()
+
     def notify_owner(self, text: str) -> None:
         """Сообщение от страницы: короткий отчёт в Telegram о том, что там нажали."""
         chat = self.owner_chat()
-        if chat and text:
-            self.bot.send(chat, text)
+        if not text:
+            return
+        if not chat:
+            print(f"[bot] некому писать в Telegram (нет TELEGRAM_CHAT_ID и владелец не определён): "
+                  f"{text[:80]}", flush=True)
+            return
+        self.bot.send(chat, text)
 
     def stop_for_web(self, job) -> None:
         """Остановка задания со страницы: то же самое, что делает /stop в Telegram."""
@@ -429,16 +482,28 @@ class App:
                                    "Положите книгу в том вручную (папка books) или пришлите часть.")
             return
         target = self.jobs.books / f"{safe_stem(name)}.epub"
-        if target.exists() and target.stat().st_size == size:
-            book = target                        # тот же файл уже был: не качаем заново
-        else:
-            try:
-                self.bot.download(document["file_id"], target)
-            except Exception as exc:
-                self.bot.send(chat_id, f"Не смог скачать файл: {exc}")
-                return
-            book = target
-        job = self.jobs.add(name, chat_id)
+        fresh = self.jobs.books / f"{safe_stem(name)}-{os.urandom(2).hex()}.epub"
+        try:
+            self.bot.download(document["file_id"], fresh)
+        except Exception as exc:
+            self.bot.send(chat_id, f"Не смог скачать файл: {exc}")
+            return
+        # Одинаковый файл не качаем и не храним дважды: сравниваем по содержимому, а не по имени.
+        try:
+            if target.exists() and same_file(fresh, target):
+                fresh.unlink(missing_ok=True)
+                book = target
+            else:
+                fresh.replace(target)
+                book = target
+        except OSError as exc:
+            book = fresh
+            print(f"[bot] не удалось сравнить книги ({exc}), работаю с копией {book.name}", flush=True)
+        try:
+            job = self.jobs.add(name, chat_id)
+        except Exception as exc:
+            self.bot.send(chat_id, f"Не смог создать задание: {exc}")
+            return
         job.meta["book"] = str(book)
         job.save()
         self.bot.send(chat_id, f"📖 Принял «{name}» ({book.stat().st_size / 1e6:.1f} МБ).\n"
@@ -502,6 +567,13 @@ def main() -> int:
         return 3
     for path in (app.jobs.books, app.jobs.results, app.jobs.jobs_dir):
         path.mkdir(parents=True, exist_ok=True)
+    stale = app.jobs.fail_stale_queued()
+    if stale:
+        print(f"[bot] заданий, не успевших запуститься: {stale} — помечены неудачными, "
+              f"их можно повторить", flush=True)
+        app.notify_owner(f"⚠️ После перезапуска нашлось незапущенных заданий: {stale}. "
+                         f"Нажмите «повторить» на странице или /repeat <номер>, "
+                         f"чтобы собрать их заново.")
     print(f"[bot] @{app.username} на связи; конвейер {PIPELINE}; данные {DATA}", flush=True)
     print(f"[bot] tmux: {'есть' if app.jobs.has_tmux else 'нет — задания пойдут отдельными процессами'}",
           flush=True)

@@ -65,10 +65,13 @@ class Login:
 class Session:
     """Терминал CLI: вычитываем ссылку, затем передаём код и собираем результат."""
 
+    SESSION_TTL = 15 * 60      # попытка входа живёт четверть часа: дальше код всё равно просрочен
+
     def __init__(self, master: int, pid: int):
         self.master = master
         self.pid = pid
         self.buffer = ""
+        self.started = time.monotonic()
         self.reaped = False        # процесс уже забрали: повторно waitpid нельзя
 
     def read(self, seconds: float = 3.0) -> str:
@@ -107,6 +110,10 @@ class Session:
 
     def submit_code(self, code: str) -> None:
         os.write(self.master, (code.strip() + "\n").encode())
+
+    def expired(self) -> bool:
+        """Пора ли закрыть попытку входа: код из браузера за это время успевает устареть."""
+        return time.monotonic() - self.started > self.SESSION_TTL
 
     def alive(self) -> bool:
         """Живой ли ещё CLI. Процесс забираем только один раз: повторный waitpid — ошибка."""
