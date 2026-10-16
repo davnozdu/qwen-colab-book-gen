@@ -71,7 +71,7 @@ for _ in $(seq 1 40); do
 done
 
 sleep 2
-feed "{\"update_id\":2,\"message\":{\"message_id\":2,\"chat\":{\"id\":$CHAT},\"text\":\"/jobs\"}}"
+feed "{\"update_id\":10,\"message\":{\"message_id\":10,\"chat\":{\"id\":$CHAT},\"text\":\"/jobs\"}}"
 sleep 4
 
 echo "--- что прислал бот ---"
