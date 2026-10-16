@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import time
 
 import colab_auth
@@ -55,14 +57,98 @@ HELP = """Я собираю аудиокниги через Google Colab.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
 
 
+class ColabLogin:
+    """Вход в Google Colab — один на два входа: Telegram и веб-страницу.
+
+    Держит терминал CLI, в который подставляется код из браузера, умеет показать ссылку,
+    проверить вход, отложить токен (сброс) и спросить остаток аккаунта.
+    """
+
+    def __init__(self, token_file: pathlib.Path):
+        self.token_file = pathlib.Path(token_file)
+        self.login = colab_auth.Login(self.token_file)
+        self.session = None
+        self.url = ""
+        self.note = ""
+
+    def state(self) -> dict:
+        signed = True if self.login.has_token() else (False if self.session else None)
+        return {"signed_in": signed, "busy": bool(self.session),
+                "url": self.url if self.session else "", "note": self.note}
+
+    def begin(self) -> str:
+        if not self.session and self.login.terminal_logged_in():
+            self.note = "вход есть"
+            return "Вход в Colab уже есть — авторизоваться заново не нужно."
+        if self.session:
+            return "Вход уже начат: пришлите код из браузера."
+        try:
+            session = self.login.start()
+        except Exception as exc:
+            return f"Не смог запустить CLI: {exc}"
+        url = session.wait_for_url(120)
+        if not url:
+            session.close()
+            return "CLI не выдал ссылку авторизации: " + session.summary()
+        session.wait_for_prompt(60)
+        self.session, self.url, self.note = session, url, "ждём код из браузера"
+        return ("Вход в Google Colab\n\n1. Откройте ссылку (можно с телефона):\n" + url +
+                "\n\n2. Войдите в нужный аккаунт и подтвердите доступ.\n"
+                "3. Google покажет страницу с кодом — пришлите этот код следующим сообщением.")
+
+    def submit(self, code: str) -> str:
+        if not self.session:
+            return "Сначала начните вход: /login (или кнопка «войти» на странице)."
+        session, self.session, self.url = self.session, None, ""
+        session.submit_code(code)
+        answer = session.wait_finish(120)
+        session.close()
+        if self.login.has_token() and "Enter the authorization code" not in answer:
+            self.note = "вход выполнен"
+            return "✅ Вход выполнен, token.json сохранён в томе конфигов."
+        self.note = "не получилось войти"
+        return "Не получилось войти. Ответ CLI: " + session.summary()
+
+    def reset(self) -> str:
+        if self.session:
+            self.session.close()
+            self.session, self.url = None, ""
+        if not self.token_file.exists():
+            self.note = "входа и не было"
+            return "Входа и не было — можно сразу входить заново."
+        backup = self.token_file.with_name(
+            f"{self.token_file.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
+        try:
+            self.token_file.rename(backup)
+        except OSError as exc:
+            return f"Не смог отложить текущий вход: {exc}"
+        self.note = f"вход отложен как {backup.name}"
+        return (f"Вход сброшен: старый token.json лежит рядом как {backup.name}. "
+                f"Дальше нажмите «войти» и войдите заново (можно другим аккаунтом).")
+
+    def usage(self) -> str:
+        binary = shutil.which("colab")
+        if not binary:
+            return "CLI не установлен в этом контейнере."
+        try:
+            done = subprocess.run([binary, "usage"], capture_output=True, text=True, timeout=180,
+                                  env=dict(os.environ), input="")
+            output = (done.stdout + done.stderr).strip() or "пусто"
+        except Exception as exc:
+            return f"Не вышло: {exc}"
+        signed = "Enter the authorization code" not in output
+        self.note = f"вход: {'есть' if signed else 'нет'}"
+        return f"Вход в Colab: {'есть' if signed else 'нет'}\n{output[-600:]}"
+
+
 class App:
     def __init__(self, token: str):
         self.bot = Bot(token)
         self.username = ""
         self.jobs = Jobs(DATA, PIPELINE, max_jobs=MAX_JOBS)
         self.state = self.load_state()
-        self.pending_login = None       # (chat_id, Login, colab_auth.Session)
-        self.login = colab_auth.Login(TOKEN_FILE)
+        self.pending_login = None       # чат, от которого ждём код авторизации
+        self.colab = ColabLogin(pathlib.Path(TOKEN_FILE))
 
     # ────────────────────────────── состояние ──────────────────────────────
     def load_state(self) -> dict:
@@ -126,8 +212,9 @@ class App:
         text = (message.get("text") or "").strip()
         document = message.get("document") or {}
 
-        if self.pending_login and str(chat_id) == self.pending_login[0] and text and not text.startswith("/"):
-            self.finish_login(text)
+        if self.pending_login and str(chat_id) == self.pending_login and text and not text.startswith("/"):
+            self.pending_login = None
+            self.bot.send(chat_id, self.colab.submit(text))
             return
         if not self.allowed(chat_id):
             self.bot.send(chat_id, "Это бот владельца, книги я не принимаю.")
@@ -211,55 +298,23 @@ class App:
         self.bot.send(chat_id, f"⏹ «{job.meta['name']}» остановлено.")
 
     def show_usage(self, chat_id) -> None:
-        import shutil
-        import subprocess
-        binary = shutil.which("colab")
-        if not binary:
-            self.bot.send(chat_id, "CLI не установлен в этом контейнере.")
-            return
-        try:
-            done = subprocess.run([binary, "usage"], capture_output=True, text=True, timeout=120,
-                                  env=dict(os.environ), input="")
-            output = (done.stdout + done.stderr).strip()[-800:] or "пусто"
-        except Exception as exc:
-            output = f"не вышло: {exc}"
-        self.bot.send(chat_id, "Аккаунт Colab:\n" + output)
+        self.bot.send(chat_id, self.colab.usage())
 
     # ────────────────────────────── вход в Colab ──────────────────────────────
     def start_login(self, chat_id) -> None:
-        if self.login.terminal_logged_in():
-            self.bot.send(chat_id, "Вход в Colab уже есть — авторизоваться заново не нужно.")
-            return
-        try:
-            session = self.login.start()
-        except Exception as exc:
-            self.bot.send(chat_id, f"Не смог запустить CLI: {exc}")
-            return
-        url = session.wait_for_url(120)
-        if not url:
-            session.close()
-            self.bot.send(chat_id, "CLI не выдал ссылку авторизации:\n" + session.summary())
-            return
-        session.wait_for_prompt(60)
-        self.pending_login = (str(chat_id), self.login, session)
-        self.bot.send(chat_id, "Вход в Google Colab\n\n1. Откройте ссылку (можно с телефона):\n"
-                               f"{url}\n\n2. Войдите в нужный аккаунт и подтвердите доступ.\n"
-                               "3. Google покажет страницу с кодом — пришлите этот код мне "
-                               "следующим сообщением.", preview=True)
+        message = self.colab.begin()
+        self.pending_login = str(chat_id) if self.colab.session else None
+        self.bot.send(chat_id, message, preview=True)
 
     def finish_login(self, code: str) -> None:
-        pending = self.pending_login
-        if not pending:
-            return
-        chat_id, login, session = pending
-        self.pending_login = None
-        session.submit_code(code)
-        answer = session.wait_finish(120)
-        session.close()
-        if login.has_token() and "Enter the authorization code" not in answer:
-            self.bot.send(chat_id, "✅ Вход выполнен, token.json сохранён в томе конфигов.")
-        else:
-            self.bot.send(chat_id, "Не получилось войти. Ответ CLI:\n" + session.summary())
+        self.bot.send(self.pending_login or "", self.colab.submit(code))
+
+    def stop_for_web(self, job) -> None:
+        """Остановка задания со страницы: то же самое, что делает /stop в Telegram."""
+        self.jobs.stop(job)
+        job.meta.update({"status": "stopped", "finished": time.time(),
+                         "note": "остановлено со страницы"})
+        job.save()
 
     # ────────────────────────────── книги ──────────────────────────────
     def accept_document(self, chat_id, document: dict) -> None:
@@ -359,6 +414,16 @@ def main() -> int:
     print(f"[bot] @{app.username} на связи; конвейер {PIPELINE}; данные {DATA}", flush=True)
     print(f"[bot] tmux: {'есть' if app.jobs.has_tmux else 'нет — задания пойдут отдельными процессами'}",
           flush=True)
+
+    if os.environ.get("WEB_ENABLED", "1") not in ("0", "no", "false"):
+        import web
+        port = int(os.environ.get("WEB_PORT", "8080"))
+        page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
+                          stop=app.stop_for_web, login=app.colab)
+        web.start_server(page, "0.0.0.0", port)
+        print(f"[bot] страница: http://<адрес>:{port} — статус, загрузка книги, файлы, вход в Colab;"
+              f" пароля пока нет, поэтому только локальная сеть", flush=True)
+
     app.loop()
     return 0
 

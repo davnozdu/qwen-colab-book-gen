@@ -14,7 +14,9 @@ ENV PYTHONUNBUFFERED=1 \
     HOME=/home/bot \
     BOT_DIR=/opt/bot \
     PIPELINE_DIR=/opt/qwen-epub-audiobook \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    WEB_PORT=8080 \
+    WEB_ENABLED=1
 
 # tmux — фоновые задания; attr — xattr для ссылок на Google Drive; tini — аккуратное завершение.
 RUN apt-get update \

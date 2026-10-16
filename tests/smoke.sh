@@ -18,6 +18,9 @@ printf '[]\n' > "$STATE/updates.json"
 printf 'PK fake epub' > "$STATE/file.bin"
 rm -f "$STATE/sent.jsonl"
 
+# Порт страницы: в контейнере 8080 (совпадает с EXPOSE в образе), локально 8090, чтобы не мешать.
+if [ "${RUN_LOCAL:-0}" = "1" ]; then WEB_PORT="${WEB_PORT:-8090}"; else WEB_PORT="${WEB_PORT:-8080}"; fi
+
 cleanup() {
     if [ -n "${BOT_PID:-}" ]; then kill "$BOT_PID" 2>/dev/null || true; fi
     if [ -n "${STUB_PID:-}" ]; then kill "$STUB_PID" 2>/dev/null || true; fi
@@ -40,13 +43,14 @@ if [ "${RUN_LOCAL:-0}" = "1" ]; then
           TELEGRAM_CHAT_ID="$CHAT" POLL_SECONDS=1 DATA_DIR="$WORK/data" \
           PIPELINE_DIR="$HERE/pipeline" STATE_FILE="$WORK/data/state.json" \
           TOKEN_FILE="$WORK/data/token.json" FAKE_SECONDS="${FAKE_SECONDS:-4}" \
+          WEB_PORT="$WEB_PORT" \
           python3 bot.py > "$WORK/bot.log" 2>&1 ) &
     BOT_PID=$!
 else
     docker run -d --name qwen-smoke --network host \
         -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://127.0.0.1:$PORT" \
         -e TELEGRAM_CHAT_ID="$CHAT" -e POLL_SECONDS=1 -e PIPELINE_DIR=/stub/pipeline \
-        -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root \
+        -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root -e WEB_PORT="$WEB_PORT" \
         -v "$HERE/pipeline:/stub/pipeline:ro" \
         -v "$WORK/data:/data" "$IMAGE" >/dev/null
 fi
@@ -81,6 +85,9 @@ echo "--- проверки ---"
 fail=0
 TG_STATE="$STATE" python3 "$HERE/check_sent.py" || fail=1
 [ -f "$WORK/data/results/smoke.zip" ] || { echo "  ✗ архива нет в томе результатов"; fail=1; }
+
+echo "--- проверяю веб-страницу ---"
+if ! WEB_BASE="http://127.0.0.1:$WEB_PORT" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
 
 # Ничего не должно остаться работать: ни фонового окна, ни процесса сборки.
 # Даём пару секунд на завершение и не считаем зомби (они уже не работают).

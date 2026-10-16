@@ -20,6 +20,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import threading
 import time
 
 DRIVE_LINK_RE = re.compile(r"https://drive\.google\.com/(?:drive/folders|file/d)/[^\s)\]]+")
@@ -37,6 +38,16 @@ def safe_stem(name: str) -> str:
 def session_name(job_id: str) -> str:
     """Имя сессии Colab CLI и tmux: коротко и только из допустимых символов."""
     return "b" + re.sub(r"[^0-9a-zA-Z]", "", job_id)[-10:]
+
+
+def locked(method):
+    """Блокировка на время работы метода: состояние меняют и бот, и веб-страница."""
+    def wrapper(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    wrapper.__name__ = method.__name__
+    wrapper.__doc__ = method.__doc__
+    return wrapper
 
 
 class Job:
@@ -105,8 +116,12 @@ class Jobs:
             path.mkdir(parents=True, exist_ok=True)
         self.env = dict(os.environ if env is None else env)
         self.has_tmux = shutil.which("tmux") is not None
+        # Состояние читают и меняют два потока: бот (Telegram) и страница. Одна блокировка
+        # на объект — и «залипших» статусов из-за гонки не будет.
+        self.lock = threading.RLock()
 
     # ────────────────────────────── приём книги ──────────────────────────────
+    @locked
     def add(self, name: str, chat_id: str) -> Job:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         job_id = f"{stamp}-{os.urandom(2).hex()}"
@@ -127,6 +142,7 @@ class Jobs:
     def free_slot(self) -> bool:
         return len(self.live_running()) < self.max_jobs
 
+    @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
               max_hours: float = 7.0, extra: list | None = None) -> None:
         command = ([str(self.entry)] if self.entry else [sys_executable(), str(self.runner)]) + \
@@ -201,6 +217,7 @@ class Jobs:
         return [job for job in self.load() if job.status == "queued" or
                 (job.status == "running" and self.alive(job))]
 
+    @locked
     def refresh(self) -> dict:
         """Обновляет статусы: завершившиеся задания получают done или failed."""
         changed = {}
@@ -226,6 +243,7 @@ class Jobs:
             changed[job.id] = job
         return changed
 
+    @locked
     def stop(self, job: Job) -> None:
         if self.has_tmux:
             subprocess.run(["tmux", "kill-session", "-t", job.meta["session"]], capture_output=True,
