@@ -15,10 +15,14 @@ services:
       SHRINK_HOURS: ${SHRINK_HOURS:-7}
       MAX_JOBS: ${MAX_JOBS:-1}
     volumes:
-      # Вход в Colab (token.json, sessions.json) и настройки — переживают пересборку контейнера.
-      - ./config:/root/.config
+      # Домашний каталог бота: там вход в Colab (token.json, sessions.json) и настройки.
+      # Переживает пересборку и обновление образа.
+      - ./config:/home/bot
       # Книги, задания и готовые архивы.
       - ./data:/data
+    # Чтобы файлы в томах принадлежали вам, а не root, раскомментируйте и подставьте свои id:
+    #   PUID=$(id -u) PGID=$(id -g) docker compose up -d
+    # user: "${PUID:-0}:${PGID:-0}"
     # Псевдотерминал нужен Colab CLI: он спрашивает подтверждение Drive и код авторизации.
     tty: true
     # Если у вас уже есть свой бот-контейнер в одной сети — просто уберите эту строку.

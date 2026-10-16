@@ -21,8 +21,12 @@ rm -f "$STATE/sent.jsonl"
 cleanup() {
     if [ -n "${BOT_PID:-}" ]; then kill "$BOT_PID" 2>/dev/null || true; fi
     if [ -n "${STUB_PID:-}" ]; then kill "$STUB_PID" 2>/dev/null || true; fi
-    if [ "${RUN_LOCAL:-0}" != "1" ]; then docker rm -f qwen-smoke >/dev/null 2>&1 || true; fi
-    if [ -z "${KEEP_WORK:-}" ]; then rm -rf "$WORK"; fi
+    if [ "${RUN_LOCAL:-0}" != "1" ]; then
+        # Файлы в томе созданы контейнером: возвращаем их владельцу, иначе тома не удалить.
+        docker exec qwen-smoke chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
+        docker rm -f qwen-smoke >/dev/null 2>&1 || true
+    fi
+    if [ -z "${KEEP_WORK:-}" ]; then rm -rf "$WORK" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
@@ -73,13 +77,15 @@ TG_STATE="$STATE" python3 "$HERE/check_sent.py" || fail=1
 [ -f "$WORK/data/results/smoke.zip" ] || { echo "  ✗ архива нет в томе результатов"; fail=1; }
 
 # Ничего не должно остаться работать: ни фонового окна, ни процесса сборки.
+# Даём пару секунд на завершение и не считаем зомби (они уже не работают).
 if [ "${RUN_LOCAL:-0}" != "1" ]; then
+    sleep 3
     if docker exec qwen-smoke sh -c 'tmux ls 2>/dev/null | grep -q .'; then
         echo "  ✗ осталась работающая сессия tmux"; fail=1
     else
         echo "  ✓ фоновых окон не осталось"
     fi
-    if docker exec qwen-smoke sh -c 'pgrep -f "colab/cli/run-book.py" >/dev/null'; then
+    if docker exec qwen-smoke sh -c 'ps -eo stat=,args= | grep "run-book" | grep -v grep | grep -qv "^Z"'; then
         echo "  ✗ остался процесс сборки"; fail=1
     else
         echo "  ✓ процессов сборки не осталось"

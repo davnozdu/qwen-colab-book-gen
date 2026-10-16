@@ -1,7 +1,8 @@
 # Образ: Telegram-бот, который принимает книгу и запускает сборку аудиокниги через Google Colab CLI.
 #
 # Внутри: свежий Google Colab CLI (ставится из PyPI), tmux для фоновых заданий,
-# копия конвейера qwen-epub-audiobook (её кладёт CI перед сборкой, см. .github/workflows/build.yml).
+# attr для xattr (ссылки на Drive) и копия конвейера qwen-epub-audiobook
+# (её кладёт CI перед сборкой, см. .github/workflows/build.yml).
 # Google Colab CLI требует Python >= 3.12 (проверено на 3.13 — как на рабочей машине).
 FROM python:3.13-slim
 
@@ -10,7 +11,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     DEBIAN_FRONTEND=noninteractive \
-    HOME=/root \
+    HOME=/home/bot \
     BOT_DIR=/opt/bot \
     PIPELINE_DIR=/opt/qwen-epub-audiobook \
     DATA_DIR=/data
@@ -33,18 +34,19 @@ COPY bot/ /opt/bot/
 COPY scripts/run-book.sh /usr/local/bin/run-book
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/run-book /usr/local/bin/entrypoint.sh \
- && rm -f /opt/qwen-epub-audiobook/colab/cli/run-book.cmd
+ && rm -f /opt/qwen-epub-audiobook/colab/cli/run-book.*.cmd \
+ && rm -rf /opt/qwen-epub-audiobook/.git
 
-# Настройки CLI: без автообновления и без лишних проверок при каждом запуске.
-RUN mkdir -p /root/.config/colab-cli \
- && printf '{"enable_update_check": false}\n' > /root/.config/colab-cli/settings.json \
+# Домашний каталог — том: там живёт вход в Colab (token.json) и настройки бота.
+RUN mkdir -p /home/bot/.config/colab-cli /data \
+ && printf '{"enable_update_check": false}\n' > /home/bot/.config/colab-cli/settings.json \
  && colab version \
  && python3 --version \
  && tmux -V \
  && /usr/local/bin/run-book --help >/dev/null \
  && echo "образ собран: CLI, tmux, конвейер и Linux-запуск на месте"
 
-VOLUME ["/root/.config", "/data"]
+VOLUME ["/home/bot", "/data"]
 EXPOSE 8080
 
 HEALTHCHECK --interval=5m --timeout=30s --start-period=30s \
