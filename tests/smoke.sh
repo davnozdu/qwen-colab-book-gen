@@ -86,6 +86,15 @@ fail=0
 TG_STATE="$STATE" python3 "$HERE/check_sent.py" || fail=1
 [ -f "$WORK/data/results/smoke.zip" ] || { echo "  ✗ архива нет в томе результатов"; fail=1; }
 
+echo "--- готовлю книги для проверки каталога ---"
+mkdir -p "$WORK/data/books"
+if [ "${RUN_LOCAL:-0}" = "1" ]; then
+    for index in $(seq -w 0 24); do printf 'probe %s' "$index" > "$WORK/data/books/probe-$index.epub"; done
+else
+    # В том пишет контейнер (от root), поэтому и файлы создаём его руками.
+    docker exec qwen-smoke sh -c 'for i in $(seq -w 0 24); do printf "probe %s" "$i" > /data/books/probe-$i.epub; done'
+fi
+
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:$WEB_PORT" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
 
