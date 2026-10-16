@@ -13,9 +13,10 @@ services:
       GPU: ${GPU:-T4}
       DRIVE_DIR: ${DRIVE_DIR:-Audiobooks-colab}
       SHRINK_HOURS: ${SHRINK_HOURS:-7}
-      # Порт страницы внутри контейнера (наружу отдаётся как ${WEB_PORT:-8090}).
-      WEB_PORT: "8080"
       MAX_JOBS: ${MAX_JOBS:-1}
+      # Страница в браузере: внутри контейнера порт 8080, наружу — как ${WEB_PORT:-8090}.
+      WEB_PORT: "8080"
+      WEB_ENABLED: ${WEB_ENABLED:-1}
     volumes:
       # Домашний каталог бота: там вход в Colab (token.json, sessions.json) и настройки.
       # Переживает пересборку и обновление образа.
@@ -30,5 +31,6 @@ services:
       - "${WEB_PORT:-8090}:8080"
     # Псевдотерминал нужен Colab CLI: он спрашивает подтверждение Drive и код авторизации.
     tty: true
+    stop_grace_period: 30s
     # Если у вас уже есть свой бот-контейнер в одной сети — просто уберите эту строку.
     # networks: [default]
