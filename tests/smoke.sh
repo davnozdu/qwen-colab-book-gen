@@ -20,8 +20,18 @@ printf '[]\n' > "$STATE/updates.json"
 printf 'PK fake epub' > "$STATE/file.bin"
 rm -f "$STATE/sent.jsonl"
 
-# Порт страницы: в контейнере 8080 (совпадает с EXPOSE в образе), локально 8090, чтобы не мешать.
-if [ "${RUN_LOCAL:-0}" = "1" ]; then WEB_PORT="${WEB_PORT:-8090}"; else WEB_PORT="${WEB_PORT:-8080}"; fi
+# Проверяем то же, что будут делать люди: страница внутри слушает 8090 (умолчание образа),
+# а наружу публикуем другой номер — как в инструкции «меняйте только левое число».
+WEB_PORT="${WEB_PORT:-8090}"      # локальный запуск: без проброса, просто 8090
+OUT_PORT="${OUT_PORT:-9090}"      # контейнер: снаружи 9090 → внутри 8090
+# В контейнерном режиме заглушка живёт на хосте, а контейнер стучится к ней через шлюз docker.
+# (Фигурные скобки awk нельзя писать внутри ${VAR:-...} — разбор обрывается, проверено.)
+if [ -z "${HOST_GATEWAY:-}" ]; then
+    HOST_GATEWAY="$(ip route 2>/dev/null | awk '/default/ {print $3; exit}' || true)"
+fi
+if [ -z "${HOST_GATEWAY:-}" ]; then
+    HOST_GATEWAY=172.17.0.1
+fi
 
 cleanup() {
     if [ -n "${BOT_PID:-}" ]; then kill "$BOT_PID" 2>/dev/null || true; fi
@@ -35,7 +45,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TG_STATE="$STATE" python3 "$HERE/tg_stub.py" "$PORT" > "$WORK/stub.log" 2>&1 &
+if [ "${RUN_LOCAL:-0}" = "1" ]; then
+    export TG_HOST=127.0.0.1
+    WEB_BASE_PORT="$WEB_PORT"
+else
+    export TG_HOST=0.0.0.0
+    WEB_BASE_PORT="$OUT_PORT"        # снаружи страница живёт на опубликованном порту
+fi
+TG_STATE="$STATE" TG_HOST="$TG_HOST" python3 "$HERE/tg_stub.py" "$PORT" > "$WORK/stub.log" 2>&1 &
 STUB_PID=$!
 sleep 2
 if ! kill -0 "$STUB_PID" 2>/dev/null; then
@@ -53,10 +70,13 @@ if [ "${RUN_LOCAL:-0}" = "1" ]; then
           python3 bot.py > "$WORK/bot.log" 2>&1 ) &
     BOT_PID=$!
 else
-    docker run -d --name qwen-smoke --network host \
-        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://127.0.0.1:$PORT" \
+    # Порт публикуем так же, как в compose (левое число : правое число), и проверяем снаружи
+    # именно его — тогда опечатка вроде «8090:9988» сразу валит тест.
+    docker run -d --name qwen-smoke \
+        -p "${OUT_PORT}:8090" \
+        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://$HOST_GATEWAY:$PORT" \
         -e TELEGRAM_CHAT_ID="$CHAT" -e POLL_SECONDS=1 -e PIPELINE_DIR=/stub/pipeline \
-        -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root -e WEB_PORT="$WEB_PORT" \
+        -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root \
         -v "$HERE/pipeline:/stub/pipeline:ro" \
         -v "$WORK/data:/data" "$IMAGE" >/dev/null
 fi
@@ -146,7 +166,7 @@ echo "--- проверки после повтора и остановки ---"
 if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/check_late.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"
-if ! WEB_BASE="http://127.0.0.1:$WEB_PORT" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
+if ! WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
 
 # Ничего не должно остаться работать: ни фонового окна, ни процесса сборки.
 # Даём пару секунд на завершение и не считаем зомби (они уже не работают).

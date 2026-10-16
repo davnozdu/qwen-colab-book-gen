@@ -5,7 +5,7 @@
 """
 import json, os, pathlib, sys, time, urllib.error, urllib.parse, urllib.request
 
-BASE = os.environ["WEB_BASE"].rstrip("/")
+BASE = os.environ["WEB_BASE"].rstrip("/")     # адрес через опубликованный порт, не изнутри контейнера
 WORK = pathlib.Path(os.environ["WORK"])
 results = []
 started = time.time()

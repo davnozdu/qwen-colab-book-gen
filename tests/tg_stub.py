@@ -97,5 +97,6 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(sys.argv[1] if len(sys.argv) > 1 else 8123)
-    print(f"заглушка Telegram на http://127.0.0.1:{port}", flush=True)
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    host = os.environ.get("TG_HOST", "127.0.0.1")     # 0.0.0.0 — когда контейнер ходит к нам из своей сети
+    print(f"заглушка Telegram на http://{host}:{port}", flush=True)
+    HTTPServer((host, port), Handler).serve_forever()

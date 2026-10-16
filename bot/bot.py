@@ -580,7 +580,7 @@ def main() -> int:
 
     if os.environ.get("WEB_ENABLED", "1") not in ("0", "no", "false"):
         import web
-        port = int(os.environ.get("WEB_PORT", "8080"))
+        port = int(os.environ.get("WEB_PORT", "8090"))
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
                           stop=app.stop_for_web, login=app.colab, notify=app.notify_owner)
         web.start_server(page, "0.0.0.0", port)

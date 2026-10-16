@@ -1,36 +1,33 @@
-# Запуск: скопируйте .env.example в .env, впишите токен бота и выполните
+# Запуск бота сборки аудиокниг. Меняете ТОЛЬКО две строки: токен и (если 8090 занят) номер порта.
+#
 #   docker compose up -d
-# Обновление образа: docker compose pull && docker compose up -d
+#   обновить: docker compose pull && docker compose up -d --force-recreate
+#   логи:     docker compose logs -f
+#
+# Порт: в паре "8090:8090" левое число — на вашей машине, правое — внутри контейнера.
+# Правое (8090) менять не нужно: страница слушает его внутри. Если 8090 занят, поменяйте
+# только левое, например "9090:8090", и открывайте http://<адрес-машины>:9090
 services:
   bot:
     image: ghcr.io/davnozdu/qwen-colab-book-gen:latest
     container_name: qwen-colab-book-gen
     restart: unless-stopped
-    env_file: .env
+
     environment:
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-      GPU: ${GPU:-T4}
-      DRIVE_DIR: ${DRIVE_DIR:-Audiobooks-colab}
-      SHRINK_HOURS: ${SHRINK_HOURS:-7}
-      MAX_JOBS: ${MAX_JOBS:-1}
-      # Страница в браузере: внутри контейнера порт 8080, наружу — как ${WEB_PORT:-8090}.
-      WEB_PORT: "8080"
-      WEB_ENABLED: ${WEB_ENABLED:-1}
+      # Токен бота от @BotFather — обязательно.
+      TELEGRAM_BOT_TOKEN: "123456789:AAвставьте_свой_токен"
+      # Чей бот: только этому чату он служит. Пусто — владельцем станет тот, кто напишет первым.
+      TELEGRAM_CHAT_ID: ""
+
     volumes:
-      # Домашний каталог бота: там вход в Colab (token.json, sessions.json) и настройки.
-      # Переживает пересборку и обновление образа.
+      # Вход в Colab (token.json) и настройки — переживают обновление образа.
       - ./config:/home/bot
       # Книги, задания и готовые архивы.
       - ./data:/data
-    # Чтобы файлы в томах принадлежали вам, а не root, раскомментируйте и подставьте свои id:
-    #   PUID=$(id -u) PGID=$(id -g) docker compose up -d
-    # user: "${PUID:-0}:${PGID:-0}"
-    # Страница: статус, загрузка книги, файлы, вход в Colab. Пароля пока нет — только локальная сеть.
+
     ports:
-      - "${WEB_PORT:-8090}:8080"
-    # Псевдотерминал нужен Colab CLI: он спрашивает подтверждение Drive и код авторизации.
+      # меняйте только левое число, если 8090 занят
+      - "8090:8090"
+
+    # Обязательно: Colab CLI спрашивает подтверждение Drive и код авторизации.
     tty: true
-    stop_grace_period: 30s
-    # Если у вас уже есть свой бот-контейнер в одной сети — просто уберите эту строку.
-    # networks: [default]

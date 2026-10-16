@@ -15,7 +15,7 @@ ENV PYTHONUNBUFFERED=1 \
     BOT_DIR=/opt/bot \
     PIPELINE_DIR=/opt/qwen-epub-audiobook \
     DATA_DIR=/data \
-    WEB_PORT=8080 \
+    WEB_PORT=8090 \
     WEB_ENABLED=1
 
 # tmux — фоновые задания; attr — xattr для ссылок на Google Drive; tini — аккуратное завершение.
@@ -49,7 +49,7 @@ RUN mkdir -p /home/bot/.config/colab-cli /data \
  && echo "образ собран: CLI, tmux, конвейер и Linux-запуск на месте"
 
 VOLUME ["/home/bot", "/data"]
-EXPOSE 8080
+EXPOSE 8090
 
 HEALTHCHECK --interval=5m --timeout=30s --start-period=30s \
   CMD pgrep -f bot.py >/dev/null || exit 1
