@@ -120,7 +120,8 @@ if web_job:
 code, page = get("/")
 check("на странице статус входа в Colab виден",
       code == 200 and any(marker in page for marker in
-                          ("вход есть".encode(), "входа нет".encode(), "неизвестно".encode())))
+                          ("вход есть".encode(), "входа нет".encode(), "неизвестно".encode(),
+                           "ждём код".encode())))
 
 code, _, _ = post("/colab/usage")
 check("кнопка «проверить / остаток» отвечает", code in (200, 303), f"код {code}")
