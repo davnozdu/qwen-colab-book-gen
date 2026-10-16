@@ -59,6 +59,12 @@ feed() {
 
 echo "книга отправлена, жду сборку…"
 feed "{\"update_id\":1,\"message\":{\"message_id\":1,\"chat\":{\"id\":$CHAT},\"document\":{\"file_id\":\"F1\",\"file_name\":\"smoke.epub\",\"file_size\":2048}}}"
+sleep 4
+
+# Пока книга собирается, вторую бот брать не должен: собираем по одной.
+feed "{\"update_id\":9,\"message\":{\"message_id\":9,\"chat\":{\"id\":$CHAT},\"document\":{\"file_id\":\"F9\",\"file_name\":\"vtoraya.epub\",\"file_size\":2048}}}"
+sleep 4
+
 for _ in $(seq 1 40); do
     sleep 2
     if grep -q "готов" "$STATE/sent.jsonl" 2>/dev/null; then break; fi
