@@ -38,7 +38,7 @@ RUN chmod +x /usr/local/bin/run-book /usr/local/bin/entrypoint.sh \
 # Настройки CLI: без автообновления и без лишних проверок при каждом запуске.
 RUN mkdir -p /root/.config/colab-cli \
  && printf '{"enable_update_check": false}\n' > /root/.config/colab-cli/settings.json \
- && colab --version \
+ && colab version \
  && python3 --version \
  && tmux -V \
  && /usr/local/bin/run-book --help >/dev/null \
