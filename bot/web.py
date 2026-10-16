@@ -270,6 +270,8 @@ class WebApp:
                 state = {"signed_in": None, "url": "", "busy": False, "error": str(exc)}
         if state.get("signed_in") is True:
             badge = '<span class="ok">вход есть</span>'
+        elif state.get("busy"):
+            badge = '<span class="note">ждём код из браузера — вход ещё не завершён</span>'
         elif state.get("signed_in") is False:
             badge = '<span class="bad">входа нет</span>'
         else:

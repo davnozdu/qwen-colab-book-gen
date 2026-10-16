@@ -72,9 +72,15 @@ class ColabLogin:
         self.note = ""
 
     def state(self) -> dict:
-        signed = True if self.login.has_token() else (False if self.session else None)
+        if self.login.has_token():
+            signed = True
+        elif self.session:
+            signed = None                 # вход начат, но код ещё не пришёл: это не «входа нет»
+        else:
+            signed = False
         return {"signed_in": signed, "busy": bool(self.session),
-                "url": self.url if self.session else "", "note": self.note}
+                "url": self.url if self.session else "",
+                "note": self.note or ("ждём код из браузера" if self.session else "")}
 
     def begin(self) -> str:
         if not self.session and self.login.terminal_logged_in():
@@ -94,7 +100,9 @@ class ColabLogin:
         self.session, self.url, self.note = session, url, "ждём код из браузера"
         return ("Вход в Google Colab\n\n1. Откройте ссылку (можно с телефона):\n" + url +
                 "\n\n2. Войдите в нужный аккаунт и подтвердите доступ.\n"
-                "3. Google покажет страницу с кодом — пришлите этот код следующим сообщением.")
+                "3. Google откроет СТРАНИЦУ С КОДОМ — скопируйте код и пришлите его мне следующим "
+                "сообщением.\n\nПока код не пришёл, вход не завершён: подтверждения в браузере "
+                "недостаточно, CLI ждёт именно код.")
 
     def submit(self, code: str) -> str:
         if not self.session:
@@ -138,6 +146,10 @@ class ColabLogin:
             return f"Не вышло: {exc}"
         signed = "Enter the authorization code" not in output
         self.note = f"вход: {'есть' if signed else 'нет'}"
+        if not signed and self.session:
+            return ("Вход ещё НЕ завершён: браузер вы подтвердили, но нужен код с той страницы, "
+                    "которую показал Google — пришлите его сюда (или вставьте в поле на странице).\n"
+                    + output[-400:])
         return f"Вход в Colab: {'есть' if signed else 'нет'}\n{output[-600:]}"
 
 
