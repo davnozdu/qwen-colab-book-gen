@@ -17,7 +17,7 @@ STATE.mkdir(parents=True, exist_ok=True)
 
 def write_atomic(path: pathlib.Path, text: str) -> None:
     """Сначала пишем во временный файл, потом подменяем: читатель не увидит половину."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # имя уникальное: пишут двое
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
 

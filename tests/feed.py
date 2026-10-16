@@ -18,6 +18,6 @@ for _ in range(40):
         time.sleep(0.05)
 
 pending.append(json.loads(os.environ["PAYLOAD"]))
-tmp = path.with_suffix(".json.tmp")
+tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # имя уникальное: пишут двое
 tmp.write_text(json.dumps(pending), encoding="utf-8")
 os.replace(tmp, path)
