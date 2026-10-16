@@ -39,6 +39,8 @@ POLL = int(os.environ.get("POLL_SECONDS", "50"))
 HELP = """Я собираю аудиокниги через Google Colab.
 
 Пришлите EPUB — начну сборку в фоне, а по ходу дела напишу о каждой стадии.
+Собираю по одной книге: пока идёт сборка, новые не принимаю — дождитесь конца или остановите
+текущую командой /stop.
 В конце пришлю архив (он же ляжет в том) и ссылки на Google Drive.
 
 /status — что делается прямо сейчас
@@ -267,6 +269,15 @@ class App:
                                    "Если книга в MOBI/FB2, переведите её, например:\n"
                                    "ebook-convert book.mobi book.epub (Calibre)")
             return
+        running = self.jobs.live_running()
+        if running:                     # одна книга за раз: новую не берём, пока не остановят
+            busy = running[0]
+            minutes = (time.time() - float(busy.meta.get("started") or time.time())) / 60
+            self.bot.send(chat_id, f"⏳ Сейчас идёт сборка «{busy.meta['name']}» ({minutes:.0f} мин).\n"
+                                   "Пока она не закончится, новые книги не принимаю.\n"
+                                   f"Остановить: /stop {busy.meta['session']}")
+            return
+
         size = int(document.get("file_size") or 0)
         if size > 20 * 1024 * 1024:
             self.bot.send(chat_id, "Файл больше 20 МБ — Bot API не отдаёт такие. "
@@ -285,12 +296,9 @@ class App:
         job = self.jobs.add(name, chat_id)
         job.meta["book"] = str(book)
         job.save()
-        started = self.jobs.free_slot()
-        self.bot.send(chat_id, f"📖 Принял «{name}» ({book.stat().st_size / 1e6:.1f} МБ).\n" +
-                               ("Запускаю сборку в фоне — о стадиях напишу сам."
-                                if started else "Задание в очереди: дождусь конца текущей книги."))
-        if started:
-            self.launch(job)
+        self.bot.send(chat_id, f"📖 Принял «{name}» ({book.stat().st_size / 1e6:.1f} МБ).\n"
+                               "Запускаю сборку в фоне — о стадиях напишу сам.")
+        self.launch(job)
 
     def launch(self, job) -> None:
         book = pathlib.Path(job.meta.get("book") or "")

@@ -8,11 +8,12 @@
 
 Записи атомарные: тест и бот читают эти файлы параллельно, и частично записанный JSON ломать нельзя.
 """
-import json, os, pathlib, sys, time, urllib.parse
+import json, os, pathlib, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = pathlib.Path(os.environ.get("TG_STATE", "/tmp/tgstate"))
 STATE.mkdir(parents=True, exist_ok=True)
+LOCK = threading.Lock()
 
 
 def write_atomic(path: pathlib.Path, text: str) -> None:
@@ -59,6 +60,15 @@ class Handler(BaseHTTPRequestHandler):
         payload = urllib.parse.parse_qs(self.rfile.read(length).decode())
         flat = {key: value[0] for key, value in payload.items()}
         method = self.path.rsplit("/", 1)[-1]
+
+        if method == "_push":
+            # Тест кладёт обновление сюда: пишет только заглушка, гонок за файл нет.
+            update = json.loads(flat.get("update") or "{}")
+            with LOCK:
+                pending = read_updates()
+                pending.append(update)
+                write_atomic(STATE / "updates.json", json.dumps(pending))
+            return self._json({"ok": True, "result": {"queued": len(pending)}})
 
         if method == "getMe":
             return self._json({"ok": True, "result": {"username": "test_book_bot", "id": 42}})

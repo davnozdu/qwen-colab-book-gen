@@ -236,6 +236,15 @@ class Jobs:
                 os.killpg(int(pid), 15)
             except (OSError, ValueError):
                 pass
+        # Обёртку прервали, значит сама она машину не освободит — делаем это за неё,
+        # иначе ускоритель останется занятым и следующий запуск не получит GPU.
+        binary = shutil.which("colab")
+        if binary:
+            try:
+                subprocess.run([binary, "stop", "-s", job.meta["session"]], capture_output=True,
+                               text=True, timeout=180, env=self.env, input="")
+            except Exception:
+                pass
         job.save()
 
 

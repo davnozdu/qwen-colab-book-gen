@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-"""Кладёт обновление в очередь заглушки Telegram (используется в smoke-тесте).
+"""Отправляет обновление заглушке Telegram (используется в smoke-тесте).
 
-Пишем атомарно и с повтором: заглушка и бот читают тот же файл параллельно, поэтому
-промежуточное состояние наружу отдавать нельзя.
+Пишет не в файл, а по HTTP: так единственным писателем остаётся заглушка и гонок нет.
 """
-import json, os, pathlib, time
+import json, os, time, urllib.parse, urllib.request
 
-state = pathlib.Path(os.environ["TG_STATE"])
-path = state / "updates.json"
+url = os.environ.get("TG_STUB_URL", "http://127.0.0.1:8123/_push")
+payload = urllib.parse.urlencode({"update": os.environ["PAYLOAD"]}).encode()
 
-pending = []
-for _ in range(40):
+for attempt in range(20):
     try:
-        pending = json.loads(path.read_text(encoding="utf-8") or "[]")
+        with urllib.request.urlopen(urllib.request.Request(url, data=payload), timeout=10) as response:
+            json.load(response)
         break
-    except (ValueError, FileNotFoundError):
-        time.sleep(0.05)
-
-pending.append(json.loads(os.environ["PAYLOAD"]))
-tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # имя уникальное: пишут двое
-tmp.write_text(json.dumps(pending), encoding="utf-8")
-os.replace(tmp, path)
+    except Exception:
+        if attempt == 19:
+            raise
+        time.sleep(0.3)

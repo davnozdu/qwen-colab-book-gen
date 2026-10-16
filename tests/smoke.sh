@@ -52,9 +52,9 @@ else
 fi
 sleep 3
 
-# Обновления кладём прямо в состояние заглушки: тесту не нужна настоящая сеть.
+# Обновления отправляем заглушке по HTTP: единственный писатель — она сама.
 feed() {
-    TG_STATE="$STATE" PAYLOAD="$1" python3 "$HERE/feed.py"
+    TG_STUB_URL="http://127.0.0.1:$PORT/_push" PAYLOAD="$1" python3 "$HERE/feed.py"
 }
 
 echo "книга отправлена, жду сборку…"
