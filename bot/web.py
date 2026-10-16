@@ -114,11 +114,14 @@ def safe_name(name: str) -> str:
 class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
-    def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None):
+    def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
+                 notify=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
         self.stop_job = stop or (lambda job: None)
+        # notify — то же самое сообщение уходит в Telegram: что нажали на странице, видно и в чате.
+        self.notify = notify or (lambda text: None)
         # login — объект с методами state(), begin(), submit(code), reset(), usage()
         self.login = login
         self.last_message = ""
@@ -150,10 +153,24 @@ class WebApp:
                     json.dumps(payload, ensure_ascii=False, indent=2).encode(), {})
         if method == "GET" and where == "/health":
             return 200, "text/plain; charset=utf-8", b"ok\n", {}
+        if method == "GET" and parsed.path.endswith("/tail"):
+            part = parsed.path.split("/")                 # /log/<сессия>/tail
+            job = self.jobs.by_id(part[-2]) if len(part) >= 3 else None
+            if job is None:
+                return (404, "application/json; charset=utf-8",
+                        json.dumps({"text": "", "offset": 0, "status": "нет задания"}).encode(), {})
+            payload = job.log_payload(_int(query.get("offset", ["0"])[0], 0))
+            return 200, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode(), {}
         if method == "GET" and parsed.path.startswith("/log/"):
-            job = self.jobs.by_id(path_las(parsed.path))
-            text = job.tail(200_000) if job else "нет такого задания"
-            return 200, "text/plain; charset=utf-8", text.encode(), {}
+            key = parsed.path[len("/log/"):].strip("/")
+            if key.endswith("/tail"):
+                key = key[:-len("/tail")]
+            job = self.jobs.by_id(key)
+            if job is None:
+                return 200, "text/plain; charset=utf-8", "нет такого задания".encode(), {}
+            if "raw" in query or query.get("raw"):
+                return 200, "text/plain; charset=utf-8", job.tail(200_000).encode(), {}
+            return self.html(self.shell(self.log_page(job)))
         if method == "GET" and parsed.path.startswith("/result/"):
             return self.send_file(self.jobs.results, path_las(parsed.path), "application/zip")
         if method == "GET" and parsed.path.startswith("/file/"):
@@ -179,9 +196,18 @@ class WebApp:
                                  "note": "остановлено со страницы"})
                 job.save()
             if jobs:
+                self.notify(f"⏹ Со страницы остановлено заданий: {len(jobs)}. "
+                            f"Машины Colab освобождены.")
                 return self.redirect("/", f"Остановлено заданий: {len(jobs)}. "
                                           f"Машины Colab освобождены.")
             return self.redirect("/", "Останавливать нечего: ничего не собирается.")
+        if method == "POST" and parsed.path.startswith("/delete/"):
+            job = self.jobs.by_id(path_las(parsed.path))
+            if job is None:
+                return self.redirect("/", "Такого задания уже нет.")
+            message = self.jobs.delete(job)
+            self.notify(message)
+            return self.redirect("/", message)
         if method == "POST" and parsed.path.startswith("/stop/"):
             job = self.jobs.by_id(path_las(parsed.path))
             if job is None:
@@ -189,13 +215,17 @@ class WebApp:
             self.stop_job(job)
             return self.redirect("/", f"Задание «{job.meta['name']}» остановлено.")
         if method == "POST" and where == "/login/start":
-            return self.redirect("/", self.login_call("begin"))
+            message = self.login_call("begin")
+            self.notify("Вход запрошен со страницы.\n" + message)   # ссылка придёт и в Telegram
+            return self.redirect("/", message)
         if method == "POST" and where == "/login/code":
             fields = form_fields(content_type, body)
             code = (fields.get("code", {}).get("data") or b"").decode("utf-8", "replace").strip()
             if not code:
                 return self.redirect("/", "Код пустой — скопируйте его со страницы Google и вставьте сюда.")
-            return self.redirect("/", self.login_call("submit", code))
+            message = self.login_call("submit", code)
+            self.notify("Код со страницы: " + message)
+            return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
         if method == "POST" and where == "/colab/usage":
@@ -283,7 +313,7 @@ class WebApp:
         note = ""
         if meta.get("note"):
             note = f'<div class="note">{html.escape(str(meta["note"])[:160])}</div>'
-        actions = [f'<a href="/log/{job.meta["session"]}">журнал</a>']
+        actions = [f'<a href="/log/{job.meta["session"]}" target="_blank">журнал</a>']
         if meta.get("result"):
             actions.append(f'<a href="/result/{urllib.parse.quote(pathlib.Path(meta["result"]).name)}">'
                            f'скачать</a>')
@@ -299,6 +329,10 @@ class WebApp:
             actions.append(f'<form class="inline" method="post" action="/repeat/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit" title="Запустить сборку этой книги заново">'
                            f'повторить</button></form>')
+            actions.append(f'<form class="inline" method="post" action="/delete/{job.meta["session"]}" '
+                           f"onsubmit=\"return confirm('Убрать это задание из списка?')\""
+                           f'><button class="ghost" type="submit" title="Убрать задание из списка '
+                           f'(книга и архив останутся)">удалить</button></form>')
         return (f'<tr><td class="name">{html.escape(meta["name"])}</td>'
                 f'<td>{icons.get(job.status, "•")} {job.status} · {elapsed}{tail}{note}</td>'
                 f'<td>{" · ".join(actions)}</td></tr>')
@@ -347,6 +381,41 @@ class WebApp:
                 f'<div style="margin-top:10px">{" ".join(buttons)}</div>'
                 f'{extra_html}'
                 f'</div>')
+
+    def log_page(self, job) -> str:
+        """Живой журнал: страница сама дотягивает новые строки и обновляет статус."""
+        payload = job.log_payload(0)
+        status_line = (f'<span id="status">{html.escape(job.status)} · {payload["elapsed"]}</span>')
+        return (f'<div class="card"><h2>Журнал: {html.escape(job.meta["name"])}</h2>'
+                f'<div class="muted">Состояние: {status_line} · обновляется само, '
+                f'перезагружать страницу не нужно. '
+                f'<a href="/log/{job.meta["session"]}?raw=1">текстом</a> · '
+                f'<a href="/">к сборкам</a></div>'
+                f'<pre id="log" style="white-space:pre-wrap;max-height:70vh;overflow:auto;'
+                f'background:#0f1114;border:1px solid #2a2f36;border-radius:8px;padding:12px;'
+                f'margin-top:10px">{html.escape(payload["text"])}</pre></div>'
+                f'<script>'
+                f'const pre = document.getElementById("log");'
+                f'const st = document.getElementById("status");'
+                f'let offset = {payload["offset"]};'
+                f'async function pull() {{'
+                f'  try {{'
+                f'    const r = await fetch("/log/{job.meta["session"]}/tail?offset=" + offset,'
+                f' {{cache: "no-store"}});'
+                f'    if (r.ok) {{'
+                f'      const j = await r.json();'
+                f'      if (j.text) {{'
+                f'        const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;'
+                f'        pre.textContent += j.text; offset = j.offset;'
+                f'        if (stick) {{ pre.scrollTop = pre.scrollHeight; }}'
+                f'      }}'
+                f'      st.textContent = j.status + " · " + j.elapsed;'
+                f'    }}'
+                f'  }} catch (e) {{}}'
+                f'  setTimeout(pull, 1500);'
+                f'}}'
+                f'setTimeout(pull, 1000);'
+                f'</script>')
 
     def files_card(self, base: str, title: str, kind: str) -> str:
         folder = self.jobs.books if kind == "books" else self.jobs.results
@@ -419,6 +488,7 @@ class WebApp:
         job.meta["book"] = str(book)
         job.save()
         self.launch_job(job)
+        self.notify(f"🔁 Повторяю сборку «{book.name}» (запущено со страницы).")
         return self.redirect("/", f"Повторяю сборку «{book.name}» — о ходе напишу.")
 
     def upload(self, content_type: str, body: bytes) -> tuple:
@@ -439,6 +509,8 @@ class WebApp:
         job.meta["book"] = str(target)
         job.save()
         self.launch_job(job)
+        self.notify(f"📖 Принял «{name}» ({len(data) / 1e6:.1f} МБ) — загружено со страницы, "
+                    f"сборка пошла.")
         return self.redirect("/", f"Принял «{name}» ({len(data) / 1e6:.1f} МБ) — сборка пошла.")
 
     def redirect(self, location: str, message: str) -> tuple:

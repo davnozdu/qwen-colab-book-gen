@@ -104,6 +104,21 @@ class Job:
             return ""
         return text[-limit:]
 
+    def log_payload(self, offset: int = 0) -> dict:
+        """Кусок журнала для живой страницы: новые байты с позиции offset плюс состояние."""
+        try:
+            data = self.log.read_bytes()
+        except OSError:
+            data = b""
+        started = float(self.meta.get("started") or self.meta.get("created") or time.time())
+        finished = float(self.meta.get("finished") or time.time())
+        seconds = max(0, finished - started)
+        elapsed = (f"{int(seconds // 60)} мин" if seconds < 3600
+                   else f"{int(seconds // 3600)} ч {int(seconds % 3600 // 60)} мин")
+        offset = max(0, min(int(offset), len(data)))
+        return {"text": data[offset:].decode("utf-8", "replace"), "offset": len(data),
+                "size": len(data), "status": self.status, "elapsed": elapsed}
+
     def drive_links(self) -> list:
         links = []
         for url in DRIVE_LINK_RE.findall(self.tail(20000)):
@@ -161,6 +176,14 @@ class Jobs:
         return Job(path)
 
     # ────────────────────────────── запуск ──────────────────────────────
+    @locked
+    def delete(self, job: Job) -> str:
+        """Убрать задание из списка вместе с журналом. Книга и архив остаются на месте."""
+        if job.status == "running" and self.alive(job):
+            return "Задание ещё идёт — сначала остановите его."
+        shutil.rmtree(job.path, ignore_errors=True)
+        return f"Задание «{job.meta['name']}» удалено из списка."
+
     def live_running(self) -> list:
         """Только те, что реально работают сейчас (очередь слот не занимает)."""
         return [job for job in self.load() if job.status == "running" and self.alive(job)]

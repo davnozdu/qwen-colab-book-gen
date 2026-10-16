@@ -8,8 +8,10 @@
 set -euo pipefail
 
 IMAGE="${IMAGE:-ghcr.io/davnozdu/qwen-colab-book-gen:latest}"
-PORT="${PORT:-8123}"
+# Порты выбираем свои: иначе прогон может попасть на заглушку от прошлого запуска.
+PORT="${PORT:-$(( 8000 + RANDOM % 900 ))}"
 CHAT="${CHAT:-555}"
+pkill -f tg_stub.py 2>/dev/null || true
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="$(mktemp -d)"
 STATE="$WORK/tgstate"
@@ -33,9 +35,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-TG_STATE="$STATE" python3 "$HERE/tg_stub.py" "$PORT" &
+TG_STATE="$STATE" python3 "$HERE/tg_stub.py" "$PORT" > "$WORK/stub.log" 2>&1 &
 STUB_PID=$!
-sleep 1
+sleep 2
+if ! kill -0 "$STUB_PID" 2>/dev/null; then
+    echo "заглушка Telegram не поднялась (порт $PORT занят?):"; cat "$WORK/stub.log"
+    exit 1
+fi
 
 if [ "${RUN_LOCAL:-0}" = "1" ]; then
     ( cd "$HERE/../bot" && \

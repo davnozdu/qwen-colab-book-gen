@@ -103,6 +103,16 @@ check("загруженная книга доехала до конца", bool(w
 if web_job:
     code, log = get(f"/log/{web_job['session']}")
     check("журнал задания открывается", code == 200 and "готово".encode() in log)
+    check("журнал живой: страница сама подтягивает строки",
+          b"/tail?offset=" in log and b"setTimeout(pull" in log)
+    code, tail = get(f"/log/{web_job['session']}/tail?offset=0")
+    payload = json.loads(tail) if code == 200 else {}
+    check("хвост журнала отдаётся куском json",
+          code == 200 and payload.get("text", "").startswith("==") and payload.get("status") == "done",
+          f"код {code}, статус {payload.get('status')}")
+    code, tail2 = get(f"/log/{web_job['session']}/tail?offset={payload.get('offset', 0)}")
+    check("новых строк нет — приходит пусто",
+          code == 200 and json.loads(tail2).get("text") == "")
     code, archive = get(f"/result/{pathlib.Path(web_job['result']).name}")
     check("архив скачивается со страницы", code == 200 and archive[:2] == b"PK")
 
@@ -122,6 +132,22 @@ check("кнопка «войти» отвечает без падения",
 
 code, _, _ = post("/login/reset")
 check("кнопка «сбросить вход» отвечает", code in (200, 303), f"код {code}")
+
+# Удаление задания со страницы: запись уходит из списка, книга остаётся.
+if web_job:
+    code, _, _ = post(f"/delete/{web_job['session']}")
+    after = json.loads(get("/api/jobs")[1])
+    check("задание удаляется со страницы",
+          code == 303 and all(item["session"] != web_job["session"] for item in after))
+    check("книга при этом осталась в папке",
+          any(path.name == "web-book.epub" for path in (WORK / "data" / "books").iterdir()))
+
+# Действия со страницы должны дублироваться в Telegram (в тесте — в журнал заглушки).
+sent_path = WORK / "tgstate" / "sent.jsonl"      # журнал заглушки Telegram лежит рядом с данными
+sent_text = sent_path.read_text(encoding="utf-8") if sent_path.exists() else ""
+check("вход со страницы продублирован в Telegram", "Вход запрошен со страницы" in sent_text)
+check("повтор со страницы продублирован в Telegram", "запущено со страницы" in sent_text)
+check("загрузка со страницы продублирована в Telegram", "загружено со страницы" in sent_text)
 
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)}, время {time.time() - started:.0f} с)")

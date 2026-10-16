@@ -48,6 +48,7 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /status — что делается прямо сейчас
 /jobs — последние задания
 /repeat <номер> — собрать эту книгу заново
+/delete <номер> — убрать задание из списка (книга и архив остаются)
 /log <номер> — хвост журнала задания
 /stop <номер> — остановить задание
 /login — войти в Google Colab (если вход истёк)
@@ -272,6 +273,8 @@ class App:
             self.show_log(chat_id, argument)
         elif head == "/stop":
             self.stop_job(chat_id, argument)
+        elif head in ("/delete", "/del", "/remove"):
+            self.delete_job(chat_id, argument)
         elif head == "/repeat":
             self.repeat_job(chat_id, argument)
         elif head == "/login":
@@ -345,6 +348,15 @@ class App:
         return (f"⏹ Остановлено заданий: {len(jobs)} — {names}.\\n"
                 f"Машины Colab освобождены, новые книги можно присылать.")
 
+    def delete_job(self, chat_id, argument: str) -> None:
+        """Убрать задание из списка: книга и архив остаются, пропадает только запись и журнал."""
+        job = self.jobs.by_id(argument) if argument else None
+        if job is None:
+            self.bot.send(chat_id, "Что удалить? /delete <номер из /jobs>. Без номера не удаляю, "
+                                   "чтобы не снести лишнее.")
+            return
+        self.bot.send(chat_id, self.jobs.delete(job))
+
     def repeat_job(self, chat_id, argument: str) -> None:
         """Повторить сборку книги: пригодится, когда сессия Colab прервалась или кончился лимит."""
         job = self.jobs.by_id(argument) if argument else None
@@ -375,6 +387,17 @@ class App:
 
     def finish_login(self, code: str) -> None:
         self.bot.send(self.pending_login or "", self.colab.submit(code))
+
+    def owner_chat(self) -> str:
+        """Кому писать: чат из настроек, иначе тот, кто первым написал боту."""
+        return ((os.environ.get("TELEGRAM_CHAT_ID", "").split(",")[0].strip())
+                or (self.state.get("owner") or "").strip())
+
+    def notify_owner(self, text: str) -> None:
+        """Сообщение от страницы: короткий отчёт в Telegram о том, что там нажали."""
+        chat = self.owner_chat()
+        if chat and text:
+            self.bot.send(chat, text)
 
     def stop_for_web(self, job) -> None:
         """Остановка задания со страницы: то же самое, что делает /stop в Telegram."""
@@ -487,7 +510,7 @@ def main() -> int:
         import web
         port = int(os.environ.get("WEB_PORT", "8080"))
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
-                          stop=app.stop_for_web, login=app.colab)
+                          stop=app.stop_for_web, login=app.colab, notify=app.notify_owner)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "
