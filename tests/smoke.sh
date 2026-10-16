@@ -31,25 +31,24 @@ cleanup() {
     if [ "${RUN_LOCAL:-0}" != "1" ]; then
         # Файлы в томе созданы контейнером: возвращаем их владельцу, иначе тома не удалить.
         docker exec qwen-smoke chown -R "$(id -u):$(id -g)" /data 2>/dev/null || true
-        docker rm -f qwen-smoke >/dev/null 2>&1 || true
+        docker rm -f qwen-smoke qwen-mock >/dev/null 2>&1 || true
+        docker network rm qwen-smoke-net >/dev/null 2>&1 || true
     fi
     if [ -z "${KEEP_WORK:-}" ]; then rm -rf "$WORK" 2>/dev/null || true; fi
 }
 trap cleanup EXIT
 
 if [ "${RUN_LOCAL:-0}" = "1" ]; then
-    export TG_HOST=127.0.0.1
     WEB_BASE_PORT="$WEB_PORT"
+    TG_STATE="$STATE" TG_HOST=127.0.0.1 python3 "$HERE/tg_stub.py" "$PORT" > "$WORK/stub.log" 2>&1 &
+    STUB_PID=$!
+    sleep 2
+    if ! kill -0 "$STUB_PID" 2>/dev/null; then
+        echo "заглушка Telegram не поднялась (порт $PORT занят?):"; cat "$WORK/stub.log"
+        exit 1
+    fi
 else
-    export TG_HOST=0.0.0.0
     WEB_BASE_PORT="$OUT_PORT"        # снаружи страница живёт на опубликованном порту
-fi
-TG_STATE="$STATE" TG_HOST="$TG_HOST" python3 "$HERE/tg_stub.py" "$PORT" > "$WORK/stub.log" 2>&1 &
-STUB_PID=$!
-sleep 2
-if ! kill -0 "$STUB_PID" 2>/dev/null; then
-    echo "заглушка Telegram не поднялась (порт $PORT занят?):"; cat "$WORK/stub.log"
-    exit 1
 fi
 
 if [ "${RUN_LOCAL:-0}" = "1" ]; then
@@ -64,15 +63,22 @@ if [ "${RUN_LOCAL:-0}" = "1" ]; then
 else
     # Порт публикуем так же, как в compose (левое число : правое число), и проверяем снаружи
     # именно его — тогда опечатка вроде «8090:9988» сразу валит тест.
-    # host.docker.internal — надёжный адрес хоста из контейнера (на Linux включаем явно).
-    docker run -d --name qwen-smoke \
-        --add-host=host.docker.internal:host-gateway \
-        -p "${OUT_PORT}:8090" \
-        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://host.docker.internal:$PORT" \
+    NET=qwen-smoke-net
+    docker network create "$NET" >/dev/null 2>&1 || true
+    # Заглушка Telegram — отдельным контейнером в той же сети; наружу отдаём только её порт,
+    # чтобы тест мог подкидывать обновления.
+    docker run -d --name qwen-mock --network "$NET" -p "${PORT}:${PORT}" \
+        -e TG_STATE=/state -e TG_HOST=0.0.0.0 \
+        -v "$HERE:/tests:ro" -v "$STATE:/state" \
+        python:3.13-slim python /tests/tg_stub.py "$PORT" >/dev/null
+    # Бот: порт страницы публикуем как в compose — снаружи OUT_PORT, внутри 8090.
+    docker run -d --name qwen-smoke --network "$NET" -p "${OUT_PORT}:8090" \
+        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://qwen-mock:$PORT" \
         -e TELEGRAM_CHAT_ID="$CHAT" -e POLL_SECONDS=1 -e PIPELINE_DIR=/stub/pipeline \
         -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root \
         -v "$HERE/pipeline:/stub/pipeline:ro" \
         -v "$WORK/data:/data" "$IMAGE" >/dev/null
+    sleep 3
 fi
 sleep 3
 
