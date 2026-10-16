@@ -421,8 +421,11 @@ def main() -> int:
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
                           stop=app.stop_for_web, login=app.colab)
         web.start_server(page, "0.0.0.0", port)
-        print(f"[bot] страница: http://<адрес>:{port} — статус, загрузка книги, файлы, вход в Colab;"
-              f" пароля пока нет, поэтому только локальная сеть", flush=True)
+        outside = os.environ.get("WEB_OUTSIDE_PORT", "")
+        where = f"наружу порт {outside}" if outside else "наружу — как указано в ports: compose.yaml"
+        print(f"[bot] страница поднялась: внутри контейнера 0.0.0.0:{port}, {where}. "
+              f"Открывайте ВНЕШНИЙ порт (в compose это левая часть пары), например "
+              f"http://<адрес-машины>:{outside or port}/", flush=True)
 
     app.loop()
     return 0
