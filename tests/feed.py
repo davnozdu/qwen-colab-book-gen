@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Кладёт обновление в очередь заглушки Telegram (используется в smoke-тесте)."""
-import json, os, pathlib
+"""Кладёт обновление в очередь заглушки Telegram (используется в smoke-тесте).
+
+Пишем атомарно и с повтором: заглушка и бот читают тот же файл параллельно, поэтому
+промежуточное состояние наружу отдавать нельзя.
+"""
+import json, os, pathlib, time
 
 state = pathlib.Path(os.environ["TG_STATE"])
-pending = json.loads((state / "updates.json").read_text())
+path = state / "updates.json"
+
+pending = []
+for _ in range(40):
+    try:
+        pending = json.loads(path.read_text(encoding="utf-8") or "[]")
+        break
+    except (ValueError, FileNotFoundError):
+        time.sleep(0.05)
+
 pending.append(json.loads(os.environ["PAYLOAD"]))
-(state / "updates.json").write_text(json.dumps(pending))
+tmp = path.with_suffix(".json.tmp")
+tmp.write_text(json.dumps(pending), encoding="utf-8")
+os.replace(tmp, path)

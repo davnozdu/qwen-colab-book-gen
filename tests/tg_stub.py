@@ -1,16 +1,35 @@
 #!/usr/bin/env python3
 """Заглушка Telegram Bot API: принимает запросы бота, отдаёт заранее заготовленные обновления.
 
-Состояние в /tmp/tgstate:
-  updates.json  — очередь обновлений (можно дописывать на лету)
+Состояние в каталоге TG_STATE:
+  updates.json  — очередь обновлений (тест дописывает туда события)
   sent.jsonl    — всё, что бот «отправил»
   file.bin      — содержимое, которое скармливается как скачанный документ
+
+Записи атомарные: тест и бот читают эти файлы параллельно, и частично записанный JSON ломать нельзя.
 """
-import json, os, pathlib, sys, urllib.parse
+import json, os, pathlib, sys, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = pathlib.Path(os.environ.get("TG_STATE", "/tmp/tgstate"))
 STATE.mkdir(parents=True, exist_ok=True)
+
+
+def write_atomic(path: pathlib.Path, text: str) -> None:
+    """Сначала пишем во временный файл, потом подменяем: читатель не увидит половину."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def read_updates() -> list:
+    path = STATE / "updates.json"
+    for _ in range(20):
+        try:
+            return json.loads(path.read_text(encoding="utf-8") or "[]")
+        except (ValueError, FileNotFoundError):
+            time.sleep(0.05)
+    return []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -18,7 +37,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, payload, code=200):
-        body = json.dumps(payload).encode()
+        body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -43,23 +62,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if method == "getMe":
             return self._json({"ok": True, "result": {"username": "test_book_bot", "id": 42}})
+
         if method == "getUpdates":
-            pending = json.loads((STATE / "updates.json").read_text()) if (STATE / "updates.json").exists() else []
             offset = int(flat.get("offset", 0))
-            keep, answer = [], []
-            for update in pending:
-                if int(update["update_id"]) >= offset:
-                    answer.append(update)      # выдаём и оставляем в очереди (проще для теста)
-                keep.append(update)
-            (STATE / "updates.json").write_text(json.dumps(keep))
+            pending = read_updates()
+            answer = [update for update in pending if int(update["update_id"]) >= offset]
+            # Отданные обновления убираем — как настоящий Telegram: каждое приходит один раз.
+            write_atomic(STATE / "updates.json",
+                         json.dumps([u for u in pending if int(u["update_id"]) < offset]))
             return self._json({"ok": True, "result": answer})
+
         if method == "sendMessage":
-            with (STATE / "sent.jsonl").open("a") as handle:
-                handle.write(json.dumps({"chat_id": flat.get("chat_id"), "text": flat.get("text")},
-                                        ensure_ascii=False) + "\n")
+            line = json.dumps({"chat_id": flat.get("chat_id"), "text": flat.get("text")},
+                              ensure_ascii=False)
+            with (STATE / "sent.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
             return self._json({"ok": True, "result": {"message_id": 1}})
+
         if method == "getFile":
             return self._json({"ok": True, "result": {"file_path": "books/x.epub", "file_size": 2048}})
+
         return self._json({"ok": True, "result": {}})
 
 
