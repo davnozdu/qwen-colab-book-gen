@@ -1,0 +1,25 @@
+# Запуск: скопируйте .env.example в .env, впишите токен бота и выполните
+#   docker compose up -d
+# Обновление образа: docker compose pull && docker compose up -d
+services:
+  bot:
+    image: ghcr.io/davnozdu/qwen-colab-book-gen:latest
+    container_name: qwen-colab-book-gen
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      GPU: ${GPU:-T4}
+      DRIVE_DIR: ${DRIVE_DIR:-Audiobooks-colab}
+      SHRINK_HOURS: ${SHRINK_HOURS:-7}
+      MAX_JOBS: ${MAX_JOBS:-1}
+    volumes:
+      # Вход в Colab (token.json, sessions.json) и настройки — переживают пересборку контейнера.
+      - ./config:/root/.config
+      # Книги, задания и готовые архивы.
+      - ./data:/data
+    # Псевдотерминал нужен Colab CLI: он спрашивает подтверждение Drive и код авторизации.
+    tty: true
+    # Если у вас уже есть свой бот-контейнер в одной сети — просто уберите эту строку.
+    # networks: [default]
