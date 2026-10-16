@@ -1,0 +1,40 @@
+# Минимальный запуск. Меняете только строку с токеном. Всё остальное уже имеет значения
+# по умолчанию внутри образа: GPU=T4, DRIVE_DIR=Audiobooks-colab, SHRINK_HOURS=7, MAX_JOBS=1.
+#
+#   docker compose -f compose-min.yaml up -d
+#   обновить: docker compose -f compose-min.yaml pull && docker compose -f compose-min.yaml up -d --force-recreate
+#
+# Главное правило, на котором мы спотыкались: в паре "8090:8090" оба числа — это один и тот же
+# порт (страница слушает его внутри и отдаётся наружу). Если поставить разные числа, страница
+# не откроется. WEB_PORT должен совпадать с правым числом.
+services:
+  bot:
+    image: ghcr.io/davnozdu/qwen-colab-book-gen:latest
+    container_name: qwen-colab-book-gen
+    restart: unless-stopped
+
+    environment:
+      # Токен от @BotFather — единственное, что нужно вписать.
+      TELEGRAM_BOT_TOKEN: "123456789:AAвставьте_свой_токен"
+      # Владелец бота: только этому чату он служит. Можно оставить пустым — тогда владельцем
+      # станет тот, кто напишет первым.
+      TELEGRAM_CHAT_ID: ""
+      # Порт страницы. Должен совпадать с правым числом в ports ниже.
+      WEB_PORT: "8090"
+
+    volumes:
+      # Вход в Colab (token.json) и настройки — переживают обновление образа.
+      # Пути для NAS (Synology). На обычной машине: ./config и ./data
+      - ./config:/home/bot
+      - ./data:/data
+
+    ports:
+      # Снаружи 8090 → внутри 8090. Страница: http://<адрес-машины>:8090
+      - "8090:8090"
+
+    # Обязательно: Colab CLI спрашивает подтверждение Drive и код авторизации.
+    tty: true
+
+    # Если файлы в томах должны принадлежать вам, а не root:
+    #   id -u и id -g покажут номера (на Synology обычно 1026), затем раскомментируйте:
+    # user: "1026:100"
