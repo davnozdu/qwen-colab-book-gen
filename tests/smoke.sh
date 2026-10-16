@@ -79,6 +79,7 @@ else
         -v "$HERE/pipeline:/stub/pipeline:ro" \
         -v "$WORK/data:/data" "$IMAGE" >/dev/null
     sleep 3
+    # WEB_PORT не задаём: страница должна слушать 8090 — умолчание образа, как в README.
 fi
 sleep 3
 
@@ -159,11 +160,11 @@ if [ ! -f "$WORK/data/books/limit.epub" ]; then
         docker exec qwen-smoke sh -c 'printf "PK fake" > /data/books/limit.epub'
     fi
 fi
-WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/run_via_web.py" limit.epub
+WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/run_via_web.py" limit.epub
 sleep 14
 
 echo "--- проверки после повтора и остановки ---"
-if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/check_late.py"; then fail=1; fi
+if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/check_late.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
