@@ -422,9 +422,17 @@ def main() -> int:
                           stop=app.stop_for_web, login=app.colab)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
-        print(f"[bot] страница поднялась: слушаю 0.0.0.0:{port} внутри контейнера; открывайте "
-              f"http://<адрес-машины>:{outside}/ (порт снаружи — левая часть пары в ports: "
-              f"compose.yaml)", flush=True)
+        print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "
+              f"http://<адрес-машины>:{outside}/ (левая часть пары в ports: compose.yaml)", flush=True)
+        # Проверяем себя же: если страница не отвечает изнутри, виноват не проброс портов.
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=10) as check:
+                print(f"[bot] самопроверка: страница отвечает {check.status} — значит, дело "
+                      f"только в пробросе порта наружу", flush=True)
+        except Exception as exc:
+            print(f"[bot] ВНИМАНИЕ: страница не отвечает внутри контейнера на порту {port} ({exc}); "
+                  f"проверьте WEB_PORT", flush=True)
 
     app.loop()
     return 0
