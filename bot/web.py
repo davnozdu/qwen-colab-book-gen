@@ -97,6 +97,16 @@ def parse_multipart(body: bytes, content_type: str) -> dict:
     return fields
 
 
+def form_fields(content_type: str, body: bytes) -> dict:
+    """Поля формы: браузер шлёт и multipart, и application/x-www-form-urlencoded — читаем оба."""
+    if "multipart/form-data" in content_type:
+        return parse_multipart(body, content_type)
+    if "x-www-form-urlencoded" in content_type or not content_type:
+        parsed = urllib.parse.parse_qs(body.decode("utf-8", "replace"))
+        return {key: {"filename": "", "data": value[0].encode()} for key, value in parsed.items()}
+    return {}
+
+
 def safe_name(name: str) -> str:
     return re.sub(r"[^\w\-. ()А-Яа-яЁё]+", "_", urllib.parse.unquote(name)).strip(" .")
 
@@ -151,6 +161,27 @@ class WebApp:
 
         if method == "POST" and where == "/upload":
             return self.upload(content_type, body)
+        if method == "POST" and parsed.path.startswith("/run/"):
+            return self.run_existing(path_las(parsed.path))
+        if method == "POST" and parsed.path.startswith("/repeat/"):
+            job = self.jobs.by_id(path_las(parsed.path))
+            if job is None:
+                return self.redirect("/", "Такого задания нет.")
+            book = pathlib.Path(job.meta.get("book") or "")
+            if not book.is_file():
+                return self.redirect("/", f"Файла «{book.name}» больше нет в папке — пришлите книгу заново.")
+            return self.run_existing(book.name)
+        if method == "POST" and where == "/stop":                    # остановить всё
+            jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
+            for job in jobs:
+                self.stop_job(job)
+                job.meta.update({"status": "stopped", "finished": time.time(),
+                                 "note": "остановлено со страницы"})
+                job.save()
+            if jobs:
+                return self.redirect("/", f"Остановлено заданий: {len(jobs)}. "
+                                          f"Машины Colab освобождены.")
+            return self.redirect("/", "Останавливать нечего: ничего не собирается.")
         if method == "POST" and parsed.path.startswith("/stop/"):
             job = self.jobs.by_id(path_las(parsed.path))
             if job is None:
@@ -160,8 +191,10 @@ class WebApp:
         if method == "POST" and where == "/login/start":
             return self.redirect("/", self.login_call("begin"))
         if method == "POST" and where == "/login/code":
-            fields = parse_multipart(body, content_type) if "multipart" in content_type else {}
+            fields = form_fields(content_type, body)
             code = (fields.get("code", {}).get("data") or b"").decode("utf-8", "replace").strip()
+            if not code:
+                return self.redirect("/", "Код пустой — скопируйте его со страницы Google и вставьте сюда.")
             return self.redirect("/", self.login_call("submit", code))
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
@@ -223,7 +256,12 @@ class WebApp:
         rows = [self.job_row(job) for job in page_slice(jobs, page)]
         if not rows:
             rows = ['<tr><td colspan="3" class="muted">Пока ничего не собиралось.</td></tr>']
-        table = ('<div class="card"><h2>Сборки</h2><table>'
+        stop_all = ""
+        if busy:
+            stop_all = ('<form class="inline" method="post" action="/stop" '
+                        "onsubmit=\"return confirm('Остановить все сборки и освободить машины?')\""
+                        '><button class="ghost" type="submit">остановить всё</button></form>')
+        table = (f'<div class="card"><h2>Сборки {stop_all}</h2><table>'
                  '<tr><th>Книга</th><th>Состояние</th><th>Действия</th></tr>'
                  + "\n".join(rows) + "</table>"
                  + pager(page, len(jobs), "/") + "</div>")
@@ -257,6 +295,10 @@ class WebApp:
         if job.status == "running":
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
+        else:
+            actions.append(f'<form class="inline" method="post" action="/repeat/{job.meta["session"]}">'
+                           f'<button class="ghost" type="submit" title="Запустить сборку этой книги заново">'
+                           f'повторить</button></form>')
         return (f'<tr><td class="name">{html.escape(meta["name"])}</td>'
                 f'<td>{icons.get(job.status, "•")} {job.status} · {elapsed}{tail}{note}</td>'
                 f'<td>{" · ".join(actions)}</td></tr>')
@@ -313,18 +355,23 @@ class WebApp:
         for path in files[:PER_PAGE]:
             route = "/file/" if kind == "books" else "/result/"
             changed = time.strftime("%d.%m %H:%M", time.localtime(path.stat().st_mtime))
+            action = ""
+            if kind == "books":
+                action = (f'<form class="inline" method="post" action="/run/'
+                          f'{urllib.parse.quote(path.name)}">'
+                          f'<button class="ghost" type="submit">запустить</button></form>')
             rows.append(f'<tr><td><a href="{route}{urllib.parse.quote(path.name)}">'
                         f'{html.escape(path.name)}</a></td>'
                         f'<td class="muted">{human_size(path.stat().st_size)}</td>'
-                        f'<td class="muted">{changed}</td></tr>')
+                        f'<td class="muted">{changed}</td><td>{action}</td></tr>')
         if not rows:
-            rows = ['<tr><td colspan="3" class="muted">Папка пуста.</td></tr>']
+            rows = ['<tr><td colspan="4" class="muted">Папка пуста.</td></tr>']
         more = ""
         if len(files) > PER_PAGE:
             more = f'<div class="muted" style="margin-top:8px">показаны первые {PER_PAGE} из ' \
                    f'{len(files)} — остальные в <a href="{base}">полном списке</a></div>'
         return (f'<div class="card"><h2>{title}</h2><table>'
-                f'<tr><th>Файл</th><th>Размер</th><th>Изменён</th></tr>'
+                f'<tr><th>Файл</th><th>Размер</th><th>Изменён</th><th></th></tr>'
                 + "\n".join(rows) + f'</table>{more}</div>')
 
     def files_page(self, page: int, kind: str) -> str:
@@ -335,12 +382,17 @@ class WebApp:
         rows = []
         for path in page_slice(files, page):
             changed = time.strftime("%d.%m %H:%M", time.localtime(path.stat().st_mtime))
+            action = ""
+            if kind == "books":
+                action = (f'<form class="inline" method="post" action="/run/'
+                          f'{urllib.parse.quote(path.name)}">'
+                          f'<button class="ghost" type="submit">запустить</button></form>')
             rows.append(f'<tr><td><a href="{route}{urllib.parse.quote(path.name)}">'
                         f'{html.escape(path.name)}</a></td>'
                         f'<td class="muted">{human_size(path.stat().st_size)}</td>'
-                        f'<td class="muted">{changed}</td></tr>')
+                        f'<td class="muted">{changed}</td><td>{action}</td></tr>')
         if not rows:
-            rows = ['<tr><td colspan="3" class="muted">Папка пуста.</td></tr>']
+            rows = ['<tr><td colspan="4" class="muted">Папка пуста.</td></tr>']
         return (f'<div class="card"><h2>{title}</h2>'
                 f'<div class="muted">Всего файлов: {len(files)}. Клик по имени — скачивание.</div>'
                 f'<table><tr><th>Файл</th><th>Размер</th><th>Изменён</th></tr>'
@@ -354,6 +406,20 @@ class WebApp:
             return 404, "text/plain; charset=utf-8", "файл не найден".encode(), {}
         return (200, kind, target.read_bytes(),
                 {"Content-Disposition": f'attachment; filename="{target.name}"'})
+
+    def run_existing(self, name: str) -> tuple:
+        """Запустить сборку книги, которая уже лежит в папке (повтор генерации)."""
+        book = self.jobs.books / safe_name(name)
+        if not book.is_file():
+            return self.redirect("/files", f"Файла «{name}» нет в папке.")
+        if self.jobs.live_running():
+            return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
+                                       "«остановить всё».")
+        job = self.jobs.add(book.name, "web")
+        job.meta["book"] = str(book)
+        job.save()
+        self.launch_job(job)
+        return self.redirect("/", f"Повторяю сборку «{book.name}» — о ходе напишу.")
 
     def upload(self, content_type: str, body: bytes) -> tuple:
         fields = parse_multipart(body, content_type) if "multipart/form-data" in content_type else {}

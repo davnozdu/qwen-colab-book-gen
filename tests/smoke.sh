@@ -95,6 +95,36 @@ else
     docker exec qwen-smoke sh -c 'for i in $(seq -w 0 24); do printf "probe %s" "$i" > /data/books/probe-$i.epub; done'
 fi
 
+echo "--- повтор генерации и остановка всего ---"
+SESSION=$(TG_STATE="$STATE" python3 -c "
+import json, os, pathlib
+texts = [json.loads(line) for line in (pathlib.Path(os.environ['TG_STATE']) / 'sent.jsonl').read_text().splitlines()]
+for line in texts:
+    if '/log ' in line['text']:
+        print(line['text'].split('/log ')[-1].strip())
+        break
+")
+feed "{\"update_id\":20,\"message\":{\"message_id\":20,\"chat\":{\"id\":$CHAT},\"text\":\"/repeat $SESSION\"}}"
+sleep 3
+# Останавливаем, пока повтор ещё идёт, — иначе останавливать будет нечего.
+feed "{\"update_id\":21,\"message\":{\"message_id\":21,\"chat\":{\"id\":$CHAT},\"text\":\"/stop\"}}"
+sleep 6
+
+echo "--- книга, на которой Colab отказывает (проверяем понятное объяснение) ---"
+cp "$WORK/data/books/smoke.epub" "$WORK/data/books/limit.epub" 2>/dev/null || true
+if [ ! -f "$WORK/data/books/limit.epub" ]; then
+    if [ "${RUN_LOCAL:-0}" = "1" ]; then
+        printf 'PK fake' > "$WORK/data/books/limit.epub"
+    else
+        docker exec qwen-smoke sh -c 'printf "PK fake" > /data/books/limit.epub'
+    fi
+fi
+WEB_BASE="http://127.0.0.1:$WEB_PORT" python3 "$HERE/run_via_web.py" limit.epub
+sleep 14
+
+echo "--- проверки после повтора и остановки ---"
+if ! TG_STATE="$STATE" python3 "$HERE/check_late.py"; then fail=1; fi
+
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:$WEB_PORT" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
 

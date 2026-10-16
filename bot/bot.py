@@ -47,6 +47,7 @@ HELP = """Я собираю аудиокниги через Google Colab.
 
 /status — что делается прямо сейчас
 /jobs — последние задания
+/repeat <номер> — собрать эту книгу заново
 /log <номер> — хвост журнала задания
 /stop <номер> — остановить задание
 /login — войти в Google Colab (если вход истёк)
@@ -70,6 +71,10 @@ class ColabLogin:
         self.session = None
         self.url = ""
         self.note = ""
+
+    def awaiting_code(self) -> bool:
+        """Открыт ли вход, ждущий код. Не важно, начат он в Telegram или на странице."""
+        return self.session is not None
 
     def state(self) -> dict:
         if self.login.has_token():
@@ -111,11 +116,13 @@ class ColabLogin:
         session.submit_code(code)
         answer = session.wait_finish(120)
         session.close()
-        if self.login.has_token() and "Enter the authorization code" not in answer:
+        # Успех проверяем не по тексту вывода (там по пути печатается приглашение «Enter the
+        # authorization code»), а по делу: появился token.json и CLI работает без запроса кода.
+        if self.login.has_token() and self.login.terminal_logged_in():
             self.note = "вход выполнен"
             return "✅ Вход выполнен, token.json сохранён в томе конфигов."
         self.note = "не получилось войти"
-        return "Не получилось войти. Ответ CLI: " + session.summary()
+        return "Не получилось войти. Ответ CLI:\n" + (session.summary() or answer[-300:])
 
     def reset(self) -> str:
         if self.session:
@@ -224,9 +231,19 @@ class App:
         text = (message.get("text") or "").strip()
         document = message.get("document") or {}
 
-        if self.pending_login and str(chat_id) == self.pending_login and text and not text.startswith("/"):
+        if text and not text.startswith("/") and self.colab.awaiting_code():
+            # Код авторизации принимаем при любом открытом входе: и после /login в чате,
+            # и после кнопки «войти» на странице — раньше второй случай терялся.
             self.pending_login = None
+            print("[bot] получен код авторизации, отправляю его CLI", flush=True)
+            self.bot.send(chat_id, "Код принят, проверяю…")
             self.bot.send(chat_id, self.colab.submit(text))
+            return
+        if text and not text.startswith("/") and ("4/" in text or len(text) > 40):
+            # Похоже на код, но вход не начат — говорим об этом прямо, а не молчим.
+            self.bot.send(chat_id, "Код сейчас некуда вставлять: вход не начат. "
+                                   "Начните его — /login в чате или кнопка «войти» на странице, — "
+                                   "а потом пришлите код со страницы Google.")
             return
         if not self.allowed(chat_id):
             self.bot.send(chat_id, "Это бот владельца, книги я не принимаю.")
@@ -255,6 +272,8 @@ class App:
             self.show_log(chat_id, argument)
         elif head == "/stop":
             self.stop_job(chat_id, argument)
+        elif head == "/repeat":
+            self.repeat_job(chat_id, argument)
         elif head == "/login":
             self.start_login(chat_id)
         elif head == "/usage":
@@ -299,15 +318,51 @@ class App:
         self.bot.send(chat_id, f"Журнал «{job.meta['name']}» ({job.status}):\n\n" + (job.tail(3200) or "пусто"))
 
     def stop_job(self, chat_id, argument: str) -> None:
+        if not argument:                                  # /stop без номера — остановить всё
+            self.bot.send(chat_id, self.stop_all_jobs())
+            return
+        job = self.jobs.by_id(argument)
+        if job is None:
+            self.bot.send(chat_id, "Такого задания нет. /stop без номера остановит всё.")
+            return
+        self.bot.send(chat_id, f"⏹ «{job.meta['name']}» остановлено.\n" + self.stop_one(job))
+
+    def stop_one(self, job) -> str:
+        """Гасит задание и освобождает его машину Colab."""
+        self.jobs.stop(job)
+        job.meta.update({"status": "stopped", "finished": time.time(), "note": "остановлено вручную"})
+        job.save()
+        return f"машина {job.meta['session']} освобождена"
+
+    def stop_all_jobs(self) -> str:
+        """Останавливает всё: текущую сборку, очередь и машины Colab на них."""
+        jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
+        if not jobs:
+            return "Останавливать нечего: сейчас ничего не собирается."
+        for job in jobs:
+            self.stop_one(job)
+        names = ", ".join(f"«{job.meta['name']}»" for job in jobs)
+        return (f"⏹ Остановлено заданий: {len(jobs)} — {names}.\\n"
+                f"Машины Colab освобождены, новые книги можно присылать.")
+
+    def repeat_job(self, chat_id, argument: str) -> None:
+        """Повторить сборку книги: пригодится, когда сессия Colab прервалась или кончился лимит."""
         job = self.jobs.by_id(argument) if argument else None
         if job is None:
-            self.bot.send(chat_id, "Кого останавливать? /stop <номер из /jobs>")
+            self.bot.send(chat_id, "Что повторять? /repeat <номер из /jobs>")
             return
-        self.jobs.stop(job)
-        job.meta.update({"status": "stopped", "finished": time.time(),
-                         "note": "остановлено вручную"})
-        job.save()
-        self.bot.send(chat_id, f"⏹ «{job.meta['name']}» остановлено.")
+        book = pathlib.Path(job.meta.get("book") or "")
+        if not book.is_file():
+            self.bot.send(chat_id, f"Файла «{book.name}» больше нет в томе — пришлите книгу заново.")
+            return
+        if self.jobs.live_running():
+            self.bot.send(chat_id, "Сейчас идёт другая сборка — сначала /stop или дождитесь её конца.")
+            return
+        again = self.jobs.add(book.name, chat_id)
+        again.meta["book"] = str(book)
+        again.save()
+        self.launch(again)
+        self.bot.send(chat_id, f"🔁 Повторяю сборку «{book.name}» — о ходе напишу.")
 
     def show_usage(self, chat_id) -> None:
         self.bot.send(chat_id, self.colab.usage())
@@ -406,7 +461,8 @@ class App:
             self.bot.send(chat_id, "\n\n".join(text))
         elif job.status == "failed":
             self.bot.send(chat_id, f"⚠️ «{job.meta['name']}» не собралась.\n"
-                                   f"Причина: {job.meta.get('note') or 'смотрите журнал'}\n\n"
+                                   f"{job.meta.get('note') or 'Причина неизвестна — смотрите журнал.'}\n\n"
+                                   f"Повторить: /repeat {job.meta['session']} · журнал: "
                                    f"/log {job.meta['session']}")
 
 

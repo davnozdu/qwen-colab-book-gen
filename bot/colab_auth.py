@@ -69,6 +69,7 @@ class Session:
         self.master = master
         self.pid = pid
         self.buffer = ""
+        self.reaped = False        # процесс уже забрали: повторно waitpid нельзя
 
     def read(self, seconds: float = 3.0) -> str:
         ready, _, _ = select.select([self.master], [], [], seconds)
@@ -108,8 +109,18 @@ class Session:
         os.write(self.master, (code.strip() + "\n").encode())
 
     def alive(self) -> bool:
-        done, _ = os.waitpid(self.pid, os.WNOHANG)
-        return done != self.pid
+        """Живой ли ещё CLI. Процесс забираем только один раз: повторный waitpid — ошибка."""
+        if self.reaped:
+            return False
+        try:
+            done, _ = os.waitpid(self.pid, os.WNOHANG)
+        except ChildProcessError:            # уже забран (например, при повторной проверке)
+            self.reaped = True
+            return False
+        if done == self.pid:
+            self.reaped = True
+            return False
+        return True
 
     def wait_finish(self, seconds: float = 90) -> str:
         deadline = time.monotonic() + seconds
@@ -120,11 +131,11 @@ class Session:
         return self.buffer
 
     def close(self) -> None:
-        if self.alive():
-            try:
+        try:
+            if self.alive():
                 os.killpg(self.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
         try:
             os.close(self.master)
         except OSError:

@@ -50,6 +50,32 @@ def locked(method):
     return wrapper
 
 
+def diagnose(text: str) -> str:
+    """Человеческое объяснение сбоя по журналу: чтобы в Telegram не было загадочных строк."""
+    lowered = (text or "").lower()
+    if "toomanyassignments" in lowered or "too many" in lowered:
+        return ("Все машины Colab заняты: у аккаунта исчерпан лимит бесплатных ускорителей. "
+                "Это временно — подождите (обычно помогает пауза) и нажмите «повторить» "
+                "(или /repeat).")
+    if "service unavailable" in lowered or "не выдана" in lowered or "не поднялась" in lowered:
+        return ("Colab не выдаёт машину: свободных T4 сейчас нет или лимит аккаунта. "
+                "Пожалуйста, подождите и повторите — книга никуда не денется, "
+                "она лежит в папке, кнопка «повторить» (/repeat).")
+    if "connection was lost" in lowered:
+        return ("Сессия Colab прервалась на середине сборки (машину выключили). "
+                "Можно запустить заново: «повторить» на странице или /repeat — "
+                "уже сгенерированные куски на машине не сохранились, сборка начнётся с начала.")
+    if "cache thrashing" in lowered:
+        return ("Синтез упал на кэшах MLX. Обычно помогает повторный запуск — "
+                "кэши поднимаются автоматически, но машине не хватило памяти.")
+    if "no credentials" in lowered or "не подтверд" in lowered:
+        return "Google Drive не подтверждён: зайдите на страницу и нажмите «войти» заново."
+    if "архива нет" in lowered or "не забрался" in lowered:
+        return ("Сборка закончилась, но архив не забрался с машины. Запустите заново: "
+                "«повторить» на странице или /repeat.")
+    return ""
+
+
 class Job:
     def __init__(self, path: pathlib.Path):
         self.path = path
@@ -238,7 +264,8 @@ class Jobs:
                 job.meta.update({"status": "done", "result": archives[-1]})
             else:
                 job.meta["status"] = "failed"
-                job.meta["note"] = job.last_error() or "архива нет — смотрите лог"
+                # Объясняем причину по-человечески: «все машины заняты, подождите» и т.п.
+                job.meta["note"] = diagnose(job.tail(20000)) or job.last_error() or "архива нет — смотрите лог"
             job.save()
             changed[job.id] = job
         return changed

@@ -72,7 +72,7 @@ check("в заданиях есть уже собранная книга", any("
 code, listing = get("/files")
 check("каталог книг открывается", code == 200 and b"probe-" in listing, f"код {code}")
 check("в каталоге видно размер файла", code == 200 and "Б".encode() in listing)
-rows = listing.count(b'/file/probe-')
+rows = listing.count(b'/file/')                 # все файлы на странице, не только тестовые
 check("каталог показывает не больше 20 записей", rows == 20, f"строк: {rows}")
 
 code, listing2 = get("/files?page=2")
