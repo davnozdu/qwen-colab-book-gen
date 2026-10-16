@@ -1,0 +1,38 @@
+# Запуск одной командой: docker compose -f compose-token.yaml up -d
+#
+# Этот файл — для случая, когда удобнее держать всё в одном месте: токен бота вписывается
+# прямо здесь, отдельный .env не нужен. Если положите файл рядом с обычным compose.yaml,
+# Docker будет ругаться на одинаковое имя сервиса — используйте что-то одно.
+services:
+  bot:
+    image: ghcr.io/davnozdu/qwen-colab-book-gen:latest
+    container_name: qwen-colab-book-gen
+    restart: unless-stopped
+
+    environment:
+      # ─── впишите свой токен от @BotFather ───
+      TELEGRAM_BOT_TOKEN: "123456789:AA…вставьте_токен…"
+      # Кому отвечать. Можно оставить пустым: владельцем станет тот, кто первым напишет боту.
+      TELEGRAM_CHAT_ID: ""
+      # Ускоритель Colab и папка на Google Drive.
+      GPU: "T4"
+      DRIVE_DIR: "Audiobooks-colab"
+      # Книги длиннее этого числа часов режутся на части (0 — не резать).
+      SHRINK_HOURS: "7"
+      # Сколько сборок одновременно: бот собирает по одной книге.
+      MAX_JOBS: "1"
+
+    volumes:
+      # Домашний каталог бота: вход в Colab (token.json), настройки. Переживает пересборку образа.
+      - ./config:/home/bot
+      # Книги, задания и готовые архивы.
+      - ./data:/data
+
+    # Чтобы файлы в томах принадлежали вам, а не root:
+    #   PUID=$(id -u) PGID=$(id -g) docker compose -f compose-token.yaml up -d
+    # user: "${PUID:-0}:${PGID:-0}"
+
+    # Псевдотерминал обязателен: Colab CLI спрашивает подтверждение Drive и код авторизации.
+    tty: true
+    # Без ограничения по времени: книга может собираться несколько часов.
+    stop_grace_period: 30s

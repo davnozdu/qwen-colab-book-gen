@@ -28,6 +28,11 @@ tmux для фоновых заданий, `attr` для ссылок Drive, и 
     cp .env.example .env         # впишите TELEGRAM_BOT_TOKEN (и, если нужно, TELEGRAM_CHAT_ID)
     docker compose up -d
 
+Если удобнее держать всё в одном файле — возьмите `compose-token.yaml`: там токен вписывается
+прямо в него, отдельный `.env` не нужен.
+
+    docker compose -f compose-token.yaml up -d
+
 Дальше в Telegram:
 
 1. напишите боту `/login` — он пришлёт ссылку; откройте её (можно с телефона), войдите в нужный
