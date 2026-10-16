@@ -2,7 +2,8 @@
 #
 # Внутри: свежий Google Colab CLI (ставится из PyPI), tmux для фоновых заданий,
 # копия конвейера qwen-epub-audiobook (её кладёт CI перед сборкой, см. .github/workflows/build.yml).
-FROM python:3.11-slim
+# Google Colab CLI требует Python >= 3.12 (проверено на 3.13 — как на рабочей машине).
+FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
