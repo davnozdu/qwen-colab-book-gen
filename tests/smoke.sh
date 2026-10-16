@@ -24,14 +24,6 @@ rm -f "$STATE/sent.jsonl"
 # а наружу публикуем другой номер — как в инструкции «меняйте только левое число».
 WEB_PORT="${WEB_PORT:-8090}"      # локальный запуск: без проброса, просто 8090
 OUT_PORT="${OUT_PORT:-9090}"      # контейнер: снаружи 9090 → внутри 8090
-# В контейнерном режиме заглушка живёт на хосте, а контейнер стучится к ней через шлюз docker.
-# (Фигурные скобки awk нельзя писать внутри ${VAR:-...} — разбор обрывается, проверено.)
-if [ -z "${HOST_GATEWAY:-}" ]; then
-    HOST_GATEWAY="$(ip route 2>/dev/null | awk '/default/ {print $3; exit}' || true)"
-fi
-if [ -z "${HOST_GATEWAY:-}" ]; then
-    HOST_GATEWAY=172.17.0.1
-fi
 
 cleanup() {
     if [ -n "${BOT_PID:-}" ]; then kill "$BOT_PID" 2>/dev/null || true; fi
@@ -72,9 +64,11 @@ if [ "${RUN_LOCAL:-0}" = "1" ]; then
 else
     # Порт публикуем так же, как в compose (левое число : правое число), и проверяем снаружи
     # именно его — тогда опечатка вроде «8090:9988» сразу валит тест.
+    # host.docker.internal — надёжный адрес хоста из контейнера (на Linux включаем явно).
     docker run -d --name qwen-smoke \
+        --add-host=host.docker.internal:host-gateway \
         -p "${OUT_PORT}:8090" \
-        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://$HOST_GATEWAY:$PORT" \
+        -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://host.docker.internal:$PORT" \
         -e TELEGRAM_CHAT_ID="$CHAT" -e POLL_SECONDS=1 -e PIPELINE_DIR=/stub/pipeline \
         -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root \
         -v "$HERE/pipeline:/stub/pipeline:ro" \
