@@ -47,8 +47,8 @@ archive = out / f"{book.stem}.zip"
 with zipfile.ZipFile(archive, "w") as zf:
     zf.writestr("book.m4b", b"fake audio")
 print(f"на Google Drive: /content/drive/MyDrive/{args.drive_dir}/{book.stem}/{book.stem}.m4b", flush=True)
-print("папка: https://drive.google.com/drive/folders/1TestFolderId", flush=True)
-print(f"• {book.stem}.m4b: https://drive.google.com/file/d/1TestM4bId/view", flush=True)
-print(f"• {book.stem}-read-along.epub: https://drive.google.com/file/d/1TestEpubId/view", flush=True)
+print("папка: https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456", flush=True)
+print(f"• {book.stem}.m4b: https://drive.google.com/file/d/1ZzYyXxWwVvUuTtSsRrQqPpOoNn9876543/view", flush=True)
+print(f"• {book.stem}-read-along.epub: https://drive.google.com/file/d/1MmNnOoPpQqRrSsTtUuVvWwXxYyZz1234/view", flush=True)
 print(f"готово: {archive}", flush=True)
 tell(f"✅ Книга собрана: {book.stem}")

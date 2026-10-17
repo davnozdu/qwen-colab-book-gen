@@ -79,6 +79,16 @@ def looks_like_code(text: str) -> bool:
     return len(candidate) >= 20 and " " not in candidate and "\n" not in candidate
 
 
+def looks_like_chat_id(value) -> bool:
+    """Похоже ли на номер чата Telegram: только цифры (у групп — со знаком минус).
+
+    Пометки вроде «web» — не чат: Telegram отвечает на них «Bad Request: chat not found»,
+    и все уведомления задания (включая ссылки на Google Drive) пропадают молча.
+    Поэтому такую пометку считаем «чата нет» и подставляем владельца.
+    """
+    return bool(re.fullmatch(r"-?\d+", str(value or "").strip()))
+
+
 def same_file(first: pathlib.Path, second: pathlib.Path) -> bool:
     """Один и тот же файл? Сравниваем размер, затем содержимое (книги небольшие)."""
     try:
@@ -315,8 +325,10 @@ class App:
         document = message.get("document") or {}
 
         # Сначала пускаем только своих: чужой чат не должен трогать ни книги, ни вход в Colab.
+        # Чужим не отвечаем ВООБЩЕ: молчание не подтверждает даже того, что бот существует,
+        # а в журнале контейнера остаётся строка — по ней видно, кто стучался.
         if not self.allowed(chat_id):
-            self.bot.send(chat_id, "Это бот владельца, книги я не принимаю.")
+            print(f"[bot] чужой чат {chat_id}: не отвечаю (ни команд, ни книг, ни входа)", flush=True)
             return
 
         if text and not text.startswith("/") and self.colab.awaiting_code():
@@ -362,7 +374,8 @@ class App:
         if chat_id is None:
             return
         if not self.allowed(chat_id):
-            self.bot.answer(query.get("id", ""), "Это бот владельца.")
+            self.bot.answer(query.get("id", ""))          # пустой ответ: чужим — ничего
+            print(f"[bot] чужой чат {chat_id} нажал кнопку: не отвечаю", flush=True)
             return
         self.bot.answer(query.get("id", ""), "смотрю…")
         if data in ("help", "menu", ""):
@@ -612,9 +625,10 @@ class App:
             job.save()
             self.report(job)
             return
-        # Задание могло прийти со страницы — там чата нет. Подставляем владельца, иначе
-        # об итоге и о стадиях никто не узнает (была именно такая жалоба).
-        if not job.meta.get("chat_id"):
+        # Задание могло прийти со страницы — там чата нет (или стоит пометка «web»).
+        # Подставляем владельца, иначе об итоге и о стадиях никто не узнает: Telegram на
+        # такой «чат» отвечает «chat not found», и ссылки на Google Drive теряются.
+        if not looks_like_chat_id(job.meta.get("chat_id")):
             owner = self.owner_chat()
             if owner:
                 job.meta["chat_id"] = owner
@@ -628,7 +642,9 @@ class App:
 
     def report(self, job) -> None:
         # Пишем владельцу и для заданий, запущенных со страницы (у них нет своего чата).
-        chat_id = str(job.meta.get("chat_id") or "").strip() or self.owner_chat()
+        chat_id = str(job.meta.get("chat_id") or "").strip()
+        if not looks_like_chat_id(chat_id):
+            chat_id = self.owner_chat()
         if not chat_id:
             print(f"[bot] об итоге «{job.meta.get('name')}» сообщить некому: "
                   f"нет ни чата задания, ни владельца", flush=True)
@@ -653,8 +669,10 @@ class App:
                 # Не гадаем: показываем последнюю строку журнала про Drive — там причина
                 # («не подключился», «не скопировалось»), а не только наша догадка.
                 note = job.drive_note()
+                search = job.drive_search_link()
                 text.append("Ссылок на Drive нет — похоже, доступ не подтверждали; "
                             "архив лежит в томе."
+                            + (f"\nПоиск на Drive по имени книги: {search}" if search else "")
                             + (f"\nЖурнал: {note}" if note else ""))
             self.bot.send(chat_id, "\n\n".join(text), buttons=MENU)
         elif job.status == "failed":
@@ -685,6 +703,8 @@ def main() -> int:
                          f"Нажмите «повторить» на странице или /repeat <номер>, "
                          f"чтобы собрать их заново.")
     print(f"[bot] @{app.username} на связи; конвейер {PIPELINE}; данные {DATA}", flush=True)
+    print(f"[bot] владелец: {app.owner_chat() or 'пока не определён (первый написавший станет владельцем)'}"
+          f"; остальным не отвечаю", flush=True)
     print(f"[bot] tmux: {'есть' if app.jobs.has_tmux else 'нет — задания пойдут отдельными процессами'}",
           flush=True)
 

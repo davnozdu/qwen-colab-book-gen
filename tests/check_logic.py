@@ -28,6 +28,12 @@ check("длинный код без префикса распознаётся", 
 check("случайная фраза кодом не считается", not botmod.looks_like_code("привет, как дела?"))
 check("короткий текст кодом не считается", not botmod.looks_like_code("123456"))
 
+# ── чат для уведомлений: пометка «web» — не чат, на неё Telegram отвечает «chat not found» ──
+check("номер чата владельца распознаётся", botmod.looks_like_chat_id("235005324"))
+check("чат группы со знаком минус распознаётся", botmod.looks_like_chat_id("-1001234567890"))
+check("пометка «web» чатом не считается", not botmod.looks_like_chat_id("web"))
+check("пустой чат чатом не считается", not botmod.looks_like_chat_id("") and not botmod.looks_like_chat_id(None))
+
 # ── сравнение файлов (одинаковую книгу не храним дважды) ──
 work = pathlib.Path(tempfile.mkdtemp())
 first, second, third = work / "a.epub", work / "b.epub", work / "c.epub"
@@ -134,7 +140,15 @@ check("ссылка на Drive вытаскивается из журнала", 
 check("ссылка-поиск Drive тоже считается ссылкой",
       bool(DRIVE_LINK_RE.search("папка: https://drive.google.com/drive/search?q=Книга")))
 check("ссылка на файл Drive распознаётся",
-      bool(DRIVE_LINK_RE.search("book.m4b: https://drive.google.com/file/d/1AbC/view")))
+      bool(DRIVE_LINK_RE.search("book.m4b: https://drive.google.com/file/d/"
+                                "1MmNnOoPpQqRrSsTtUuVvWwXxYyZz1234/view")))
+# Свежесозданная папка отдаёт от drivefs пометку «local-105»: ссылка по ней не открывается,
+# такие ссылки в отчёт не берём — вместо них даём рабочий поиск по имени книги.
+check("ссылка с пометкой drivefs в отчёт не попадает",
+      not DRIVE_LINK_RE.search("папка: https://drive.google.com/drive/folders/local-105"))
+check("поиск по имени книги собирается без идентификатора",
+      done.drive_search_link().startswith("https://drive.google.com/drive/search?q=")
+      and "probe" in done.drive_search_link())
 check("причина про Drive берётся из журнала", "drive.google.com" in done.drive_note())
 check("задание удаляется из списка", "удалено" in jobs.delete(done) and not jobs.by_id(done.id))
 

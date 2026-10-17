@@ -320,11 +320,15 @@ class WebApp:
         if meta.get("result"):
             actions.append(f'<a href="/result/{urllib.parse.quote(pathlib.Path(meta["result"]).name)}">'
                            f'скачать</a>')
+        # Ссылку на папку берём только «настоящую»: пометка drivefs вроде «local-105» ведёт
+        # в никуда, поэтому в этом случае даём рабочий поиск по имени книги.
         links = job.drive_links()
-        if links:
-            folder = next((url for url in links if "/folders/" in url), "")
-            if folder:
-                actions.append(f'<a href="{html.escape(folder)}" target="_blank">папка Drive</a>')
+        folder = next((url for url in links if "/folders/" in url), "")
+        if not folder:
+            folder = job.drive_search_link()
+        if folder:
+            label = "папка Drive" if "/folders/" in folder else "найти на Drive"
+            actions.append(f'<a href="{html.escape(folder)}" target="_blank">{label}</a>')
         if job.status == "running":
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
@@ -497,7 +501,7 @@ class WebApp:
         if self.jobs.live_running():
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
                                        "«остановить всё».")
-        job = self.jobs.add(book.name, "web", book)
+        job = self.jobs.add(book.name, "", book)
         self.launch_job(job)
         self.notify(f"🔁 Повторяю сборку «{book.name}» (запущено со страницы).")
         return self.redirect("/", f"Повторяю сборку «{book.name}» — о ходе напишу.")
@@ -521,7 +525,7 @@ class WebApp:
         staging = target.with_name(f"{target.name}.upload-{os.urandom(4).hex()}")
         staging.write_bytes(data)              # сначала целиком во временный файл…
         staging.replace(target)                # …и только потом на место книги
-        job = self.jobs.add(name, "web", target)
+        job = self.jobs.add(name, "", target)
         self.launch_job(job)
         self.notify(f"📖 Принял «{name}» ({len(data) / 1e6:.1f} МБ) — загружено со страницы, "
                     f"сборка пошла.")

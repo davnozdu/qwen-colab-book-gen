@@ -176,7 +176,7 @@ WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/run_via_w
 sleep 14
 
 echo "--- проверки после повтора и остановки ---"
-if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/check_late.py"; then fail=1; fi
+if ! TG_STATE="$STATE" CHECK_CHAT="$CHAT" WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/check_late.py"; then fail=1; fi
 
 echo "--- кнопки: статус, задания, остановка ---"
 # Нажатие кнопки приходит как callback_query — тот же путь, что у живого Telegram.

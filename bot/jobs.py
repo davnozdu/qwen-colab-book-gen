@@ -21,10 +21,16 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.parse
 import time
 
+# Настоящий идентификатор объекта в Drive — длинная строка из букв, цифр, «-» и «_».
+# Свежесозданная папка на смонтированном диске отдаёт вместо него пометку вроде «local-105»,
+# и ссылка по ней не открывается: такие ссылки в отчёт не берём, вместо них — поиск по имени.
+DRIVE_ID = r"[A-Za-z0-9_-]{20,}"
 DRIVE_LINK_RE = re.compile(
-    r"https://drive\.google\.com/(?:drive/folders|file/d|drive/search\?q=)[^\s)\]]+")
+    rf"https://drive\.google\.com/(?:drive/folders/{DRIVE_ID}|file/d/{DRIVE_ID}"
+    rf"|drive/search\?q=[^\s)\]]+)[^\s)\]]*")
 DRIVE_LINE_RE = re.compile(r"(?i)^.*drive.*$")
 ZIP_RE = re.compile(r"(/[^\s]*\.zip)")
 ERROR_RE = re.compile(r"(?i)(Traceback|ошибка|не удалось|failed|error|не выдана|не поднялась)[^\n]{0,120}")
@@ -127,6 +133,13 @@ class Job:
             if url not in links:
                 links.append(url)
         return links
+
+    def drive_search_link(self) -> str:
+        """Ссылка на поиск в Drive по имени книги: работает и без идентификатора от drivefs."""
+        stem = pathlib.Path(self.meta.get("name") or self.meta.get("book") or "").stem
+        if not stem:
+            return ""
+        return "https://drive.google.com/drive/search?q=" + urllib.parse.quote(stem)
 
     def archives(self) -> list:
         found = []

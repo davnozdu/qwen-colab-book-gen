@@ -29,13 +29,21 @@ for _ in range(10):
         break
     time.sleep(1)
 
+sent = [json.loads(line) for line in (state / "sent.jsonl").read_text().splitlines()]
+owner = os.environ.get("CHECK_CHAT", "")
 checks = [("по книге со страницы пришёл итог в Telegram (была жалоба: уведомления не было)",
            any("готова" in text for text in texts)),
+          # Итог и ссылки на Drive должны адресоваться ЧАТУ владельца, а не пометке «web»:
+          # Telegram на такую пометку отвечает «chat not found», и сообщение пропадает.
+          ("итог по книге со страницы адресован чату владельца",
+           bool(owner) and any(item.get("chat_id") == owner and "готова" in item.get("text", "")
+                               for item in sent)),
           ("обёртка тоже писала о старте и о готовности (чат ей передан)",
            any("Поднимаю машину Colab" in text for text in texts)
            and any("Книга собрана" in text for text in texts)),
-          ("чужому чату бот ничего не даёт",
-           any("Это бот владельца" in text for text in texts)
+          # Чужому чату — полное молчание: ни отказа, ни статуса, ни подсказок.
+          ("чужому чату бот не отвечает вовсе",
+           not any(item.get("chat_id") == "999" for item in sent)
            and not any(item["name"] == "chuzhaya.epub" for item in jobs)),
           ("повтор генерации запускается", any("Повторяю сборку «smoke.epub»" in text for text in texts)),
           ("/stop без номера останавливает всё", any("Остановлено заданий" in text for text in texts)),

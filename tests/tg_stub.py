@@ -8,7 +8,7 @@
 
 Записи атомарные: тест и бот читают эти файлы параллельно, и частично записанный JSON ломать нельзя.
 """
-import json, os, pathlib, sys, threading, time, urllib.parse
+import json, os, pathlib, re, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 STATE = pathlib.Path(os.environ.get("TG_STATE", "/tmp/tgstate"))
@@ -83,6 +83,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "result": answer})
 
         if method == "sendMessage":
+            chat = (flat.get("chat_id") or "").strip()
+            # Как настоящий Telegram: чата с таким номером нет — «chat not found». Благодаря
+            # этому прогон видит потерянные уведомления (вместо чата стояла пометка «web»,
+            # и ссылки на Google Drive тихо пропадали).
+            if not re.fullmatch(r"-?\d+", chat):
+                return self._json({"ok": False, "error_code": 400,
+                                   "description": "Bad Request: chat not found"})
             line = json.dumps({"chat_id": flat.get("chat_id"), "text": flat.get("text"),
                                "buttons": flat.get("reply_markup") or "",
                                "preview": flat.get("disable_web_page_preview") or ""},
