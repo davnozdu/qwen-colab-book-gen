@@ -5,12 +5,13 @@
 разбор форм, защиту от путей, распознавание кода авторизации, объяснение ошибок,
 жизненный цикл задания и удаление.
 """
-import os, pathlib, sys, tempfile, time
+import json, os, pathlib, sys, tempfile, time
 
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "bot"))
 
 import bot as botmod          # noqa: E402
+import jobs as jobs_mod       # noqa: E402
 import web as webmod          # noqa: E402
 from jobs import Jobs, safe_stem, DRIVE_LINK_RE  # noqa: E402
 
@@ -205,6 +206,42 @@ while time.time() < deadline and app.colab.resets == 0:       # сброс ид�
 check("подтверждение действительно сбрасывает вход",
       app.colab.resets == 1 and any("Сброс" in text for text, _ in app.bot.sent),
       str(app.bot.sent)[:160])
+
+# ── прогресс и оценка остатка: считаем по сегментам, а не по времени ──
+prog = work / "progress-data" / "j1"
+(prog / "logs").mkdir(parents=True, exist_ok=True)
+started = time.time() - 3600
+(prog / "meta.json").write_text(json.dumps({"id": "j1", "session": "s1", "name": "Проба.epub",
+                                            "status": "running", "created": started, "started": started}),
+                                encoding="utf-8")
+(prog / "log.txt").write_text(
+    "[6/12] Нарезка по предложениям + book-text.epub\n"
+    "сегментов на озвучку: 1496 | абзацев: 450 | голосов: 2 | ожидаемое время звука: 142 мин (2.4 ч)\n"
+    "[9/12] Синтез речи (MLX/CUDA)\n"
+    "сегмент 374/1496 · seg000374 narrator: 12.0s audio / 4.1s generation; sample 4000.0s\n",
+    encoding="utf-8")
+state = jobs_mod.Job(prog).progress()
+check("прогресс считает сегменты из журнала",
+      state["segments"] == 1496 and state["done"] == 374, str(state))
+check("проценты считаются по озвученным сегментам книги",
+      20 <= state["percent"] <= 30 and state["stage"] == "synth",
+      f"{state['percent']} % на стадии {state['stage']}")
+check("остаток и время окончания оцениваются",
+      state["remaining_minutes"] > 60 and state["eta"] != "" and state["stage_title"] == "синтез речи",
+      f"осталось {state['remaining']} до {state['eta']}")
+empty = work / "progress-empty"
+empty.mkdir(parents=True, exist_ok=True)
+(empty / "meta.json").write_text(json.dumps({"id": "j2", "session": "s2", "name": "Пусто",
+                                             "status": "running"}), encoding="utf-8")
+blank = jobs_mod.Job(empty).progress()
+check("пустой журнал не ломает прогресс", blank["segments"] is None and blank["percent"] == 0,
+      str(blank))
+check("кнопка «Сколько осталось» распознаётся",
+      botmod.menu_action("⏳ Сколько осталось") == "eta"
+      and botmod.menu_action("сколько еще") == "eta" and botmod.menu_action("прогресс") == "eta")
+answer = press_text("/eta")
+check("команда /eta отвечает процентами и остатком",
+      any("не собирается" in text or "осталось" in text for text, _ in answer), str(answer)[:160])
 
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"

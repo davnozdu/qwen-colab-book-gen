@@ -55,26 +55,30 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /stop <номер> — остановить задание
 /login — войти в Google Colab (если вход истёк)
 /logout — сбросить вход в Colab (сменить Google-аккаунт)
+/eta — сколько уже сделано и сколько осталось (по сегментам книги)
 /usage — остаток и активные машины аккаунта
 /help — эта подсказка
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
-Меню висит внизу под полем ввода — «Статус», «Задания», «Журнал», «Остаток», «Войти в Colab»,
-«Сбросить вход», «Остановить всё», «Помощь»: нажимайте кнопку, команды помнить не нужно.
+Меню висит внизу под полем ввода — «Статус», «Задания», «Сколько осталось», «Журнал», «Остаток»,
+«Войти в Colab», «Сбросить вход», «Остановить всё», «Помощь»: нажимайте кнопку, команды помнить
+не нужно.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
 
 # Инлайн-кнопки под сообщением: видны сразу под ответом (в истории чата остаются).
-MENU = [[("📊 Статус", "status"), ("📋 Задания", "jobs")],
-        [("📜 Журнал", "log"), ("📈 Остаток", "usage")],
-        [("🔑 Войти в Colab", "login"), ("🚪 Сбросить вход", "reset_ask")],
-        [("⏹ Остановить всё", "stop_ask"), ("❓ Помощь", "help")]]
+MENU = [[("📊 Статус", "status"), ("⏳ Сколько осталось", "eta")],
+        [("📋 Задания", "jobs"), ("📜 Журнал", "log")],
+        [("📈 Остаток", "usage"), ("🔑 Войти в Colab", "login")],
+        [("🚪 Сбросить вход", "reset_ask"), ("❓ Помощь", "help")],
+        [("⏹ Остановить всё", "stop_ask")]]
 
 # Постоянная клавиатура ПОД полем ввода: висит всегда, пока пользователь сам её не свернёт.
 # Подпись кнопки приходит обычным текстом, поэтому каждую подпись разбираем в menu_action().
-REPLY_MENU = [["📊 Статус", "📋 Задания"],
-              ["📜 Журнал", "📈 Остаток"],
-              ["🔑 Войти в Colab", "🚪 Сбросить вход"],
-              ["⏹ Остановить всё", "❓ Помощь"]]
+REPLY_MENU = [["📊 Статус", "⏳ Сколько осталось"],
+              ["📋 Задания", "📜 Журнал"],
+              ["📈 Остаток", "🔑 Войти в Colab"],
+              ["🚪 Сбросить вход", "❓ Помощь"],
+              ["⏹ Остановить всё"]]
 
 # Подпись кнопки → действие. Ключи без эмодзи и знаков: menu_action() чистит текст до букв,
 # поэтому «📊 Статус» и набранное руками «статус» ведут себя одинаково.
@@ -83,13 +87,15 @@ REPLY_ACTIONS = {"статус": "status", "задания": "jobs", "журна
                  "сброситьвход": "reset_ask", "сбросвхода": "reset_ask", "разлогиниться": "reset_ask",
                  "сброситьавторизацию": "reset_ask", "выйти": "reset_ask", "сменитьаккаунт": "reset_ask",
                  "остановитьвсе": "stop_ask", "стоп": "stop_ask", "остановить": "stop_ask",
-                 "помощь": "help", "меню": "menu"}
+                 "сколькоосталось": "eta", "осталось": "eta", "прогресс": "eta", "сколькоеще": "eta",
+                 "долго": "eta", "скоро": "eta", "помощь": "help", "меню": "menu"}
 
 # Список команд для кнопки «☰» рядом с полем ввода (ставится один раз при запуске).
-COMMANDS = [("status", "что делается прямо сейчас"), ("jobs", "последние задания"),
-            ("log", "хвост журнала задания"), ("stop", "остановить сборку"),
-            ("repeat", "собрать книгу заново"), ("delete", "убрать задание из списка"),
-            ("login", "войти в Google Colab"), ("logout", "сбросить вход в Colab (сменить аккаунт)"),
+COMMANDS = [("status", "что делается прямо сейчас"), ("eta", "сколько сделано и сколько осталось"),
+            ("jobs", "последние задания"), ("log", "хвост журнала задания"),
+            ("stop", "остановить сборку"), ("repeat", "собрать книгу заново"),
+            ("delete", "убрать задание из списка"), ("login", "войти в Google Colab"),
+            ("logout", "сбросить вход в Colab (сменить аккаунт)"),
             ("usage", "остаток и активные машины"), ("help", "подсказка и меню")]
 
 
@@ -442,6 +448,8 @@ class App:
             self.send_menu(chat_id)
         elif data == "status":
             self.status(chat_id)
+        elif data == "eta":
+            self.show_eta(chat_id)
         elif data == "jobs":
             self.list_jobs(chat_id)
         elif data == "log":
@@ -520,6 +528,8 @@ class App:
             self.start_login(chat_id)
         elif head in ("/logout", "/reset", "/signout"):
             self.do_action(chat_id, "reset_ask")          # тот же путь, что у кнопки «Сбросить вход»
+        elif head in ("/eta", "/progress", "/осталось"):
+            self.do_action(chat_id, "eta")
         elif head == "/usage":
             self.show_usage(chat_id)
         else:
@@ -539,6 +549,46 @@ class App:
         if not running and not queued:
             head = "Свободно: ничего не собирается."
         self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=MENU)
+
+    def show_eta(self, chat_id) -> None:
+        """Сколько сделано и сколько осталось. Замеры копим: со второго раза точнее оценка."""
+        jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
+        jobs.sort(key=lambda job: job.status != "running")     # сначала то, что реально идёт
+        if not jobs:
+            self.bot.send(chat_id, "Сейчас ничего не собирается — осталось 0 %.",
+                          buttons=MENU)
+            return
+        blocks = []
+        for job in jobs:
+            state = job.progress()
+            if job.status == "queued":
+                blocks.append(f"⏳ {job.meta['name']} — в очереди, ещё не начиналось.")
+                continue
+            minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
+            bar = "▰" * round(state["percent"] / 10) + "▱" * (10 - round(state["percent"] / 10))
+            lines = [f"▶️ {job.meta['name']}",
+                     f"{bar} {state['percent']} % · стадия {state['stage_index']}/{state['stages']}: "
+                     f"{state['stage_title']}"]
+            if state["done"] and state["segments"]:
+                lines.append(f"сегментов озвучено: {state['done']} из {state['segments']} "
+                             f"({round(100 * state['done'] / state['segments'])} %)")
+            detail = f"идёт {minutes:.0f} мин"
+            if state["measured_rate"]:
+                detail += f", скорость {state['measured_rate']} сегм/мин"
+            if state["remaining_minutes"]:
+                detail += (f" · осталось ≈{state['remaining']}, закончится около {state['eta']}")
+            lines.append(detail)
+            # Замер для скорости: со второго запроса оценка считается по факту, а не по модели.
+            samples = [pair for pair in (job.meta.get("progress_samples") or []) if len(pair) == 2]
+            samples.append([time.time(), state["done"] or 0])
+            job.meta["progress_samples"] = samples[-20:]
+            try:
+                job.save()
+            except OSError:
+                pass
+            blocks.append("\n".join(lines))
+        self.bot.send(chat_id, "\n\n".join(blocks)
+                      + "\n\nОценка по сегментам книги: чем дальше, тем точнее.", buttons=MENU)
 
     def list_jobs(self, chat_id) -> None:
         jobs = self.jobs.load()[:10]

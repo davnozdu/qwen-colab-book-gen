@@ -84,6 +84,22 @@ def diagnose(text: str) -> str:
     return ""
 
 
+# Стадии конвейера в том порядке, в каком их объявляет colab_run_all.py, и их «вес» в общей
+# длительности книги (~2 ч звука). Нужны для двух вещей: назвать стадию человеческим словом и
+# оценить, сколько осталось. Точное время одной стадии предсказать нельзя, а вот проценты по
+# сегментам считаются точно: книга нарезана, и синтез печатает «сегмент k/N».
+STAGE_NAMES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voices",
+               "synth", "normalize", "music", "package"]
+STAGE_TITLES = {"env": "проверка окружения", "deps": "установка зависимостей", "repo": "правки репозитория",
+                "model": "веса модели (≈4,5 ГБ)", "manifest": "EPUB → манифест", "prepare": "нарезка на сегменты",
+                "stress": "ударения", "voices": "образец чтеца", "synth": "синтез речи",
+                "normalize": "громкость и обработка", "music": "музыка", "package": "сборка m4b и epub"}
+# Сколько минут занимает стадия (кроме синтеза — он считается по сегментам). Оценки по факту
+# прошлых прогонов: конвейер не сообщает заранее, и лучше честное «примерно», чем выдумка.
+STAGE_MINUTES = {"env": 3, "deps": 4, "repo": 1, "model": 6, "manifest": 2, "prepare": 3,
+                 "stress": 5, "voices": 1, "normalize": 6, "music": 4, "package": 5}
+
+
 class Job:
     def __init__(self, path: pathlib.Path):
         self.path = path
@@ -112,6 +128,79 @@ class Job:
             return ""
         return text[-limit:]
 
+    def progress(self) -> dict:
+        """Проценты и оценка остатка по журналу.
+
+        Проценты берём по СЕГМЕНТАМ, а не по времени: книга нарезана заранее, синтез печатает
+        «сегмент k/N», и это единственная честно измеримая величина. Время остатка: синтез идёт
+        примерно за столько же часов, сколько длится звук книги (конвейер сам это печатает), плюс
+        фиксированные минуты на оставшиеся стадии из STAGE_MINUTES. Если человек уже спрашивал
+        прогресс раньше, скорость берём по факту между двумя замерами — это точнее оценки.
+        """
+        try:
+            text = self.log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        found = re.findall(r"\[(\d+)/(\d+)\]\s*(.+)", text)
+        if found:
+            index, stages, title = int(found[-1][0]), int(found[-1][1]), found[-1][2].strip()
+        else:
+            index, stages, title = 0, len(STAGE_NAMES), "подготовка"
+        name = STAGE_NAMES[index - 1] if 1 <= index <= len(STAGE_NAMES) else ""
+        counted = re.findall(r"сегмент\s+(\d+)/(\d+)", text)
+        done, segments = (int(counted[-1][0]), int(counted[-1][1])) if counted else (None, None)
+        if segments is None:
+            listed = re.search(r"сегментов на озвучку:\s*(\d+)", text)
+            segments = int(listed[1]) if listed else None
+        # Конвейер печатает ожидаемое время звука в двух видах («≈2.4 ч» в сообщении Telegram и
+        # «142 мин (2.4 ч)» в журнале), поэтому принимаем оба: иначе оценка остатка пропадёт.
+        hours = re.search(r"ожидаемое время звука[^(\n]*?(\d+(?:[.,]\d+)?)\s*ч", text)
+        minutes = re.search(r"ожидаемое время звука[^\n]*?(\d+(?:[.,]\d+)?)\s*мин", text)
+        if hours:
+            expected_hours = float(hours[1].replace(",", "."))
+        elif minutes:
+            expected_hours = float(minutes[1].replace(",", ".")) / 60
+        else:
+            expected_hours = None
+
+        # Проценты — доля ОЗВУЧЕННОЙ книги: сегментов готово из общего числа. Это то, что человек
+        # имеет в виду под «сколько книги обработано»; до синтеза честный ноль, а вес стадий не
+        # подмешиваем, иначе «40 %» звучало бы при пустой ещё книге. Оценка времени — отдельно.
+        percent = 0
+        if done and segments:
+            percent = round(100 * done / segments)
+        if self.status == "done":
+            percent = 100
+
+        rate = None                                            # сегментов в минуту по двум замерам
+        samples = [pair for pair in (self.meta.get("progress_samples") or []) if len(pair) == 2]
+        if len(samples) >= 2 and samples[-1][1] > samples[0][1]:
+            minutes = (samples[-1][0] - samples[0][0]) / 60
+            if minutes >= 2:
+                rate = (samples[-1][1] - samples[0][1]) / minutes
+
+        remaining = 0.0
+        if self.status in ("running", "queued"):
+            if name == "synth" and segments:
+                left = segments - (done or 0)
+                if rate:                                       # по факту замеров — точнее
+                    remaining += left / rate
+                elif expected_hours:
+                    remaining += 60 * expected_hours * left / segments
+            for step in STAGE_NAMES[index:]:                   # стадии после текущей
+                remaining += STAGE_MINUTES.get(step, 3)
+
+        def human(minutes: float) -> str:
+            return (f"{int(minutes)} мин" if minutes < 60
+                    else f"{int(minutes // 60)} ч {int(minutes % 60)} мин")
+
+        return {"stage": name, "stage_title": STAGE_TITLES.get(name, title), "stage_index": index,
+                "stages": stages, "segments": segments, "done": done, "percent": round(percent),
+                "expected_hours": expected_hours, "measured_rate": round(rate, 1) if rate else None,
+                "remaining_minutes": round(remaining), "remaining": human(remaining),
+                "eta": time.strftime("%H:%M", time.localtime(time.time() + remaining * 60)) if remaining else "",
+                "running": self.status == "running"}
+
     def log_payload(self, offset: int = 0) -> dict:
         """Кусок журнала для живой страницы: новые байты с позиции offset плюс состояние."""
         try:
@@ -125,7 +214,8 @@ class Job:
                    else f"{int(seconds // 3600)} ч {int(seconds % 3600 // 60)} мин")
         offset = max(0, min(int(offset), len(data)))
         return {"text": data[offset:].decode("utf-8", "replace"), "offset": len(data),
-                "size": len(data), "status": self.status, "elapsed": elapsed}
+                "size": len(data), "status": self.status, "elapsed": elapsed,
+                "progress": self.progress()}
 
     def drive_links(self) -> list:
         links = []

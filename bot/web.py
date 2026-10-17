@@ -81,6 +81,23 @@ def human_delta(seconds: float) -> str:
     return f"{seconds // 3600} ч {seconds % 3600 // 60} мин"
 
 
+def progress_line(state: dict) -> str:
+    """Строка прогресса для страницы — та же, что бот показывает в Telegram."""
+    if not state.get("stage_index"):
+        return "стадия ещё не началась"
+    done, segments = state.get("done"), state.get("segments")
+    bar = "▰" * round(state["percent"] / 10) + "▱" * (10 - round(state["percent"] / 10))
+    text = (f"{bar} {state['percent']} % · стадия {state['stage_index']}/{state['stages']}: "
+            f"{state['stage_title']}")
+    if done and segments:
+        text += f" · сегментов {done}/{segments} ({round(100 * done / segments)} %)"
+    if state.get("measured_rate"):
+        text += f" · {state['measured_rate']} сегм/мин"
+    if state.get("remaining_minutes"):
+        text += f" · осталось ≈{state['remaining']}, около {state['eta']}"
+    return text
+
+
 def human_size(size: float) -> str:
     for unit in ("Б", "КБ", "МБ", "ГБ"):
         if size < 1024 or unit == "ГБ":
@@ -167,6 +184,16 @@ class WebApp:
                         json.dumps({"text": "", "offset": 0, "status": "нет задания"}).encode(), {})
             payload = job.log_payload(_int(query.get("offset", ["0"])[0], 0))
             return 200, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode(), {}
+        if method == "GET" and parsed.path.startswith("/api/eta/"):
+            job = self.jobs.by_id(parsed.path[len("/api/eta/"):].strip("/"))
+            line = progress_line(job.progress()) if job else "нет такого задания"
+            return (200, "application/json; charset=utf-8",
+                    json.dumps({"line": line}, ensure_ascii=False).encode(), {})
+        if method == "GET" and parsed.path.startswith("/eta/"):
+            job = self.jobs.by_id(parsed.path[len("/eta/"):].strip("/"))
+            if job is None:
+                return 200, "text/plain; charset=utf-8", "нет такого задания".encode(), {}
+            return self.html(self.shell(self.eta_page(job)))
         if method == "GET" and parsed.path.startswith("/log/"):
             job = self.jobs.by_id(parsed.path[len("/log/"):].strip("/"))
             if job is None:
@@ -311,8 +338,12 @@ class WebApp:
         tail = ""
         if job.status == "running":
             lines = [line.strip() for line in job.tail(400).splitlines() if line.strip()]
+            progress = job.progress()
+            # Прогресс по сегментам важнее последней строки журнала: во время синтеза журнал
+            # забит служебными строками, а «сколько осталось» — то, ради чего страницу открыли.
+            tail = f'<div class="muted">{html.escape(progress_line(progress))}</div>'
             if lines:
-                tail = f'<div class="muted">{html.escape(lines[-1][:140])}</div>'
+                tail += f'<div class="muted" style="opacity:.6">{html.escape(lines[-1][:140])}</div>'
         note = ""
         if meta.get("note"):
             note = f'<div class="note">{html.escape(str(meta["note"])[:160])}</div>'
@@ -330,6 +361,8 @@ class WebApp:
             label = "папка Drive" if "/folders/" in folder else "найти на Drive"
             actions.append(f'<a href="{html.escape(folder)}" target="_blank">{label}</a>')
         if job.status == "running":
+            actions.append(f'<a href="/eta/{job.meta["session"]}" title="Проценты, сегменты и оценка '
+                           f'времени до конца">сколько осталось</a>')
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
         else:
@@ -390,21 +423,58 @@ class WebApp:
                 f'{extra_html}'
                 f'</div>')
 
+    def eta_page(self, job) -> str:
+        """«Сколько осталось» — та же кнопка, что в Telegram: проценты по сегментам и оценка."""
+        state = job.progress()
+        done, segments = state.get("done"), state.get("segments")
+        minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
+        rows = [(f"стадия {state['stage_index']}/{state['stages']}", state["stage_title"]),
+                ("идёт", human_delta(minutes * 60))]
+        rows.append(("сегментов озвучено",
+                     f"{done} из {segments} ({round(100 * done / segments)} %)" if done and segments else "—"))
+        if state.get("measured_rate"):
+            rows.append(("скорость по замерам", f"{state['measured_rate']} сегм/мин"))
+        if state.get("expected_hours"):
+            rows.append(("ожидаемый звук", f"{state['expected_hours']} ч (синтез идёт примерно столько же)"))
+        rows.append(("осталось", f"≈{state['remaining']}" if state.get("remaining_minutes") else "—"))
+        rows.append(("закончится около", state["eta"] or "—"))
+        table = "".join(f"<tr><th>{html.escape(name)}</th><td>{html.escape(str(value))}</td></tr>"
+                        for name, value in rows)
+        return (f'<div class="card"><h2>Сколько осталось: {html.escape(job.meta["name"])}</h2>'
+                f'<div class="muted" id="progress">{html.escape(progress_line(state))}</div>'
+                f'<table style="margin-top:10px">{table}</table>'
+                f'<div class="muted" style="margin-top:8px">Обновляется само · '
+                f'<a href="/log/{job.meta["session"]}">журнал</a> · <a href="/">к сборкам</a></div>'
+                f'<script>'
+                f'const pr = document.getElementById("progress");'
+                f'async function pull() {{'
+                f'  try {{'
+                f'    const r = await fetch("/api/eta/{job.meta["session"]}", {{cache: "no-store"}});'
+                f'    if (r.ok) {{ const j = await r.json(); if (j.line) {{ pr.textContent = j.line; }} }}'
+                f'  }} catch (e) {{}}'
+                f'  setTimeout(pull, 5000);'
+                f'}}'
+                f'setTimeout(pull, 2000);'
+                f'</script></div>')
+
     def log_page(self, job) -> str:
         """Живой журнал: страница сама дотягивает новые строки и обновляет статус."""
         payload = job.log_payload(0)
         status_line = (f'<span id="status">{html.escape(job.status)} · {payload["elapsed"]}</span>')
         return (f'<div class="card"><h2>Журнал: {html.escape(job.meta["name"])}</h2>'
-                f'<div class="muted">Состояние: {status_line} · обновляется само, '
+                f'<div class="muted">Состояние: {status_line} · '
+                f'<a href="/eta/{job.meta["session"]}">сколько осталось</a> · обновляется само, '
                 f'перезагружать страницу не нужно. '
                 f'<a href="/log/{job.meta["session"]}?raw=1">текстом</a> · '
                 f'<a href="/">к сборкам</a></div>'
+                f'<div class="muted" id="progress">{html.escape(progress_line(payload["progress"]))}</div>'
                 f'<pre id="log" style="white-space:pre-wrap;max-height:70vh;overflow:auto;'
                 f'background:#0f1114;border:1px solid #2a2f36;border-radius:8px;padding:12px;'
                 f'margin-top:10px">{html.escape(payload["text"])}</pre></div>'
                 f'<script>'
                 f'const pre = document.getElementById("log");'
                 f'const st = document.getElementById("status");'
+                f'const pr = document.getElementById("progress");'
                 f'let offset = {payload["offset"]};'
                 # Последние события показываем сразу (хвост внизу), и держим хвост внизу,
                 # пока пользователь сам не отлистал вверх: тогда «за нами» не тянет.
@@ -425,6 +495,7 @@ class WebApp:
                 f'        if (follow) {{ toBottom(); }}'
                 f'      }}'
                 f'      st.textContent = j.status + " · " + j.elapsed;'
+                f'      if (j.progress) {{ pr.textContent = j.progress.line; }}'
                 f'    }}'
                 f'  }} catch (e) {{}}'
                 f'  setTimeout(pull, 1500);'

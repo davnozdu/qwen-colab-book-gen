@@ -196,6 +196,9 @@ sleep 4
 # иначе тест снесёт вход, который нужен проверкам входа выше).
 button 53 reset_ask
 sleep 4
+# «Сколько осталось»: проверяем, что кнопка отвечает процентами и оценкой времени.
+button 54 eta
+sleep 4
 if ! TG_STATE="$STATE" BUTTONS_FROM="$BEFORE_BUTTONS" python3 "$HERE/check_buttons.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"

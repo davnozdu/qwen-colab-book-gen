@@ -29,6 +29,8 @@ checks = [
     ("сброс входа есть в Telegram и просит подтверждение",
      any("Сбросить вход в Google Colab" in text for text in texts)
      and any("reset_do" in markup for markup in menus)),
+    ("кнопка «Сколько осталось» отвечает процентом и остатком",
+     any("осталось" in text and ("%" in text or "не собирается" in text) for text in texts)),
     ("кнопки приходят как клавиатура, а не текстом",
      any("Остановить всё" in markup for markup in menu_with_buttons)
      and not any("inline_keyboard" in text for text in texts)),

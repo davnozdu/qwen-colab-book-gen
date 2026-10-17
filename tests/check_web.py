@@ -102,6 +102,18 @@ web_job = next((item for item in jobs if item["name"] == "web-book.epub"), None)
 check("загруженная книга доехала до конца", bool(web_job) and web_job["status"] == "done",
       f"статус: {web_job['status'] if web_job else 'нет задания'}")
 
+# ── 3c. «сколько осталось» на странице: та же кнопка, что в Telegram ─────────
+if web_job:
+    code, page = get(f"/eta/{web_job['session']}")
+    check("страница «сколько осталось» открывается",
+          code == 200 and "Сколько осталось".encode() in page, f"код {code}")
+    check("на ней видно проценты и сегменты",
+          code == 200 and ("%".encode() in page and "сегментов".encode() in page))
+    code, payload = get(f"/api/eta/{web_job['session']}")
+    line = json.loads(payload).get("line", "") if code == 200 else ""
+    check("живое обновление прогресса отдаёт строку",
+          code == 200 and "%" in line, f"код {code}, строка: {line[:60]}")
+
 # ── 3b. тело запроса больше потолка не читается вовсе (413) ─────────────
 host, port = urllib.parse.urlsplit(BASE).hostname, urllib.parse.urlsplit(BASE).port or 80
 sock = socket.create_connection((host, port), timeout=15)
