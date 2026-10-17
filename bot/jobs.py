@@ -207,8 +207,12 @@ class Jobs:
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
               max_hours: float = 7.0, extra: list | None = None) -> None:
         # Одна книга за раз — железно: Telegram и страница проверяют занятость по отдельности,
-        # но между проверкой и запуском есть окно. Здесь, под блокировкой, гонка закрыта.
-        live = [item for item in self.load() if item.status == "running" and self.alive(item)]
+        # но между проверкой и запуском есть окно, а одно и то же задание могут запустить сразу
+        # два потока (страница + очередь бота). Здесь, под блокировкой, обе гонки закрыты.
+        if job.status == "running" and self.alive(job):
+            return                       # это задание уже идёт: повторный запуск ничего не делает
+        live = [item for item in self.load() if item.id != job.id
+                and item.status == "running" and self.alive(item)]
         if len(live) >= self.max_jobs:
             raise RuntimeError("сейчас идёт другая сборка — дождитесь её конца или остановите её")
         command = ([str(self.entry)] if self.entry else [sys_executable(), str(self.runner)]) + \
