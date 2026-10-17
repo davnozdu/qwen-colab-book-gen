@@ -31,10 +31,26 @@ def keyboard(buttons) -> str:
     """Инлайн-клавиатура для sendMessage: [[("подпись", "данные"), …], …] → reply_markup.
 
     Кнопки важны для телефона: не нужно помнить команды — «Статус», «Задания», «Остановить».
+    Живут они под конкретным сообщением (в истории чата).
     """
     rows = [[{"text": label, "callback_data": data} for label, data in row]
             for row in (buttons or []) if row]
     return json.dumps({"inline_keyboard": rows}, ensure_ascii=False) if rows else ""
+
+
+def reply_menu(rows, placeholder: str = "книга EPUB или кнопка меню") -> str:
+    """Постоянная клавиатура ПОД полем ввода (ReplyKeyboardMarkup): menu=[["📊 Статус", …], …].
+
+    Инлайн-кнопки видны только под своим сообщением и уезжают вверх вместе с перепиской, поэтому
+    «меню» приходилось вызывать командой. ReplyKeyboardMarkup с is_persistent Telegram держит
+    внизу, пока сам пользователь его не свернёт: нажатие приходит обычным ТЕКСТОМ кнопки.
+    resize_keyboard — компактные кнопки, а не во всю ширину экрана.
+    """
+    keyboard = [[{"text": label} for label in row] for row in (rows or []) if row]
+    if not keyboard:
+        return ""
+    return json.dumps({"keyboard": keyboard, "resize_keyboard": True, "is_persistent": True,
+                       "input_field_placeholder": placeholder}, ensure_ascii=False)
 
 
 class Bot:
@@ -68,10 +84,15 @@ class Bot:
         return self.call("getMe").get("username", "")
 
     # ────────────────────────────── сообщения ──────────────────────────────
-    def send(self, chat_id, text: str, preview: bool = False, buttons=None) -> bool:
+    def send(self, chat_id, text: str, preview: bool = False, buttons=None, menu=None) -> bool:
+        """menu — постоянная клавиатура под полем ввода; buttons — инлайн под сообщением.
+
+        Две клавиатуры в одном сообщении Telegram не принимает, поэтому menu имеет приоритет:
+        его ставят там, где меню нужно показать (или поставить) само.
+        """
         payload = {"chat_id": str(chat_id), "text": text[:4000],
                    "disable_web_page_preview": "true" if not preview else "false"}
-        markup = keyboard(buttons)
+        markup = reply_menu(menu) if menu else keyboard(buttons)
         if markup:
             payload["reply_markup"] = markup
         try:
@@ -81,6 +102,20 @@ class Bot:
             # Молча терять отчёт нельзя: без строки в журнале потом не понять, почему в чате
             # пусто (а проверка, которая ждёт сообщение, падает без улик).
             print(f"[tg] сообщение не ушло в {chat_id}: {exc}", flush=True)
+            return False
+
+    def set_commands(self, commands) -> bool:
+        """Список команд для кнопки «☰» у поля ввода: команды не помнить, а видеть.
+
+        Список — часть настройки бота на стороне Telegram, поэтому его достаточно поставить
+        один раз при запуске. Ошибку не считаем смертельной: без списка бот работает.
+        """
+        try:
+            self.call("setMyCommands", {"commands": json.dumps(
+                [{"command": name, "description": text} for name, text in commands], ensure_ascii=False)})
+            return True
+        except TelegramError as exc:
+            print(f"[tg] список команд не установился: {exc}", flush=True)
             return False
 
     def answer(self, query_id: str, text: str = "") -> None:

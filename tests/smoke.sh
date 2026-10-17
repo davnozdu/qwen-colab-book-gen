@@ -94,6 +94,9 @@ feed() {
     TG_STUB_URL="http://127.0.0.1:$PORT/_push" PAYLOAD="$1" python3 "$HERE/feed.py"
 }
 
+# Счётчик падений инициализируем ДО первой проверки: раньше он обнулялся после неё,
+# и падение логических проверок молча пропадало.
+fail=0
 echo "--- проверяю логику бота (без сети) ---"
 if ! python3 "$HERE/check_logic.py"; then fail=1; fi
 
@@ -124,7 +127,6 @@ echo "--- что прислал бот ---"
 cat "$STATE/sent.jsonl" 2>/dev/null || true
 
 echo "--- проверки ---"
-fail=0
 TG_STATE="$STATE" python3 "$HERE/check_sent.py" || fail=1
 [ -f "$WORK/data/results/smoke.zip" ] || { echo "  ✗ архива нет в томе результатов"; fail=1; }
 

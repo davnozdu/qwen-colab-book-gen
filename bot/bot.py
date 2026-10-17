@@ -58,19 +58,56 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /help — эта подсказка
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
-Можно и кнопками: /start покажет меню — «Статус», «Задания», «Войти в Colab», «Остаток»,
-«Остановить всё».
+Меню висит внизу под полем ввода — «Статус», «Задания», «Журнал», «Остаток», «Войти»,
+«Остановить всё», «Помощь»: нажимайте кнопку, команды помнить не нужно.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
 
-# Нижние кнопки под сообщениями: самые ходовые действия, чтобы не писать команды руками.
+# Инлайн-кнопки под сообщением: видны сразу под ответом (в истории чата остаются).
 MENU = [[("📊 Статус", "status"), ("📋 Задания", "jobs")],
         [("🔑 Войти в Colab", "login"), ("📈 Остаток", "usage")],
         [("⏹ Остановить всё", "stop_ask")],
         [("❓ Помощь", "help")]]
 
-# Кнопки под отчётом о неудаче: сразу видно, что делать дальше.
-FAILED_MENU = [[("🔁 Повторить", "repeat"), ("📜 Журнал", "log")],
-               [("🏠 Меню", "menu")]]
+# Постоянная клавиатура ПОД полем ввода: висит всегда, пока пользователь сам её не свернёт.
+# Подпись кнопки приходит обычным текстом, поэтому каждую подпись разбираем в menu_action().
+REPLY_MENU = [["📊 Статус", "📋 Задания"],
+              ["📜 Журнал", "📈 Остаток"],
+              ["🔑 Войти в Colab", "❓ Помощь"],
+              ["⏹ Остановить всё"]]
+
+# Подпись кнопки → действие. Ключи без эмодзи и знаков: menu_action() чистит текст до букв,
+# поэтому «📊 Статус» и набранное руками «статус» ведут себя одинаково.
+REPLY_ACTIONS = {"статус": "status", "задания": "jobs", "журнал": "log", "логи": "log",
+                 "остаток": "usage", "войтивcolab": "login", "вход": "login", "входвcolab": "login",
+                 "остановитьвсе": "stop_ask", "стоп": "stop_ask", "остановить": "stop_ask",
+                 "помощь": "help", "меню": "menu"}
+
+# Список команд для кнопки «☰» рядом с полем ввода (ставится один раз при запуске).
+COMMANDS = [("status", "что делается прямо сейчас"), ("jobs", "последние задания"),
+            ("log", "хвост журнала задания"), ("stop", "остановить сборку"),
+            ("repeat", "собрать книгу заново"), ("delete", "убрать задание из списка"),
+            ("login", "войти в Google Colab"), ("usage", "остаток и активные машины"),
+            ("help", "подсказка и меню")]
+
+
+def menu_action(text: str) -> str:
+    """Подпись кнопки постоянного меню → действие («📊 Статус» и «статус» — одно и то же).
+
+    Кнопка ReplyKeyboardMarkup приходит ТЕКСТОМ, поэтому сравнивать подписи надо терпимо:
+    эмодзи, регистр, лишние пробелы и «ё» на смысл не влияют. Пустая строка — «это не кнопка».
+    """
+    key = re.sub(r"[^0-9a-zа-яё]+", "", (text or "").lower()).replace("ё", "е")
+    return REPLY_ACTIONS.get(key, "")
+
+
+def failed_menu(session: str) -> list:
+    """Кнопки под отчётом о неудаче — действие относится к ЭТОЙ сборке, а не к последней.
+
+    Сессию вшиваем в данные кнопки (лимит Telegram — 64 байта, хватает с запасом): иначе нажатие
+    под старым отчётом случайно повторило бы другую книгу.
+    """
+    return [[("🔁 Повторить", f"repeat:{session}"), ("📜 Журнал", f"log:{session}")],
+            [("🏠 Меню", "menu")]]
 
 
 def looks_like_code(text: str) -> bool:
@@ -257,6 +294,7 @@ class App:
         self.jobs = Jobs(DATA, PIPELINE, max_jobs=MAX_JOBS)
         self.state = self.load_state()
         self.colab = ColabLogin(pathlib.Path(TOKEN_FILE))
+        self.menu_chats = set()          # чаты, где постоянное меню уже поставлено (на этот запуск)
 
     # ────────────────────────────── состояние ──────────────────────────────
     def load_state(self) -> dict:
@@ -331,6 +369,15 @@ class App:
             print(f"[bot] чужой чат {chat_id}: не отвечаю (ни команд, ни книг, ни входа)", flush=True)
             return
 
+        # Постоянное меню ставим ДО разбора текста: подпись кнопки приходит текстом, и её нельзя
+        # принимать ни за код авторизации, ни за книгу.
+        action = menu_action(text)
+        if action:
+            self.install_menu(chat_id)
+            self.do_action(chat_id, action)
+            return
+        self.install_menu(chat_id)          # первый ответ в чате — заодно и меню
+
         if text and not text.startswith("/") and self.colab.awaiting_code():
             # Код авторизации принимаем при любом открытом входе (и после /login в чате, и после
             # кнопки «войти» на странице). Но не всякий текст — иначе обычная фраза ломала вход.
@@ -360,30 +407,42 @@ class App:
 
     # ────────────────────────────── кнопки ──────────────────────────────
     def send_menu(self, chat_id, text: str = "") -> None:
-        """Помощь вместе с кнопками: команды помнить не обязательно."""
-        self.bot.send(chat_id, (text or HELP).strip(), buttons=MENU)
+        """Помощь вместе с ПОСТОЯННЫМ меню: команды помнить не обязательно.
 
-    def on_button(self, query: dict) -> None:
-        """Нажали кнопку под сообщением: делаем то же, что делает команда.
-
-        В кнопках живут только «свои» действия — чужие данные игнорируем, а чужой чат
-        не обслуживаем, как и в обычных сообщениях.
+        Клавиатуру здесь ставим reply-меню, а не инлайном: она останется внизу и после того,
+        как это сообщение уедет вверх по переписке.
         """
-        chat_id = ((query.get("message") or {}).get("chat") or {}).get("id")
-        data = (query.get("data") or "").strip()
-        if chat_id is None:
+        self.menu_chats.add(str(chat_id))
+        self.bot.send(chat_id, (text or HELP).strip(), menu=REPLY_MENU)
+
+    def install_menu(self, chat_id) -> None:
+        """Поставить постоянное меню под полем ввода — один раз за запуск бота и один раз на чат.
+
+        Один короткий ответ вместо немого «напиши статус, чтобы увидеть кнопки». Дальше Telegram
+        держит клавиатуру сам (is_persistent), пока пользователь не свернёт её; если свернул —
+        /start или «Помощь» поставят её заново.
+        """
+        chat = str(chat_id)
+        if chat in self.menu_chats:
             return
-        if not self.allowed(chat_id):
-            self.bot.answer(query.get("id", ""))          # пустой ответ: чужим — ничего
-            print(f"[bot] чужой чат {chat_id} нажал кнопку: не отвечаю", flush=True)
-            return
-        self.bot.answer(query.get("id", ""), "смотрю…")
+        self.menu_chats.add(chat)
+        self.bot.send(chat, "Меню закрепил внизу под полем ввода: «Статус», «Задания», «Журнал», "
+                            "«Остаток», «Войти в Colab», «Остановить всё», «Помощь». "
+                            "Нажимайте кнопку — команды помнить не нужно.", menu=REPLY_MENU)
+
+    def do_action(self, chat_id, data: str) -> None:
+        """Что делает кнопка — ОДНО место и для инлайна, и для постоянного меню.
+
+        В кнопках живут только «свои» действия — чужие данные игнорируем.
+        """
         if data in ("help", "menu", ""):
             self.send_menu(chat_id)
         elif data == "status":
             self.status(chat_id)
         elif data == "jobs":
             self.list_jobs(chat_id)
+        elif data == "log":
+            self.show_log(chat_id, "")
         elif data == "login":
             self.start_login(chat_id)
         elif data == "usage":
@@ -394,17 +453,34 @@ class App:
         elif data == "stop_all":
             self.bot.send(chat_id, "Останавливаю всё…")
             self.in_background(chat_id, self.stop_all_jobs, "Остановка")
-        elif data in ("repeat", "log"):                # из отчёта о неудаче: последнее задание
-            jobs = self.jobs.load()
-            if not jobs:
-                self.bot.send(chat_id, "Заданий нет.")
+        elif data.startswith(("repeat:", "log:")):     # из отчёта о неудаче: ровно та сборка
+            action, _, session = data.partition(":")
+            if self.jobs.by_id(session) is None:
+                self.bot.send(chat_id, "Такого задания уже нет.")
                 return
-            if data == "repeat":
-                self.repeat_job(chat_id, jobs[0].meta["session"])
+            if action == "repeat":
+                self.repeat_job(chat_id, session)
             else:
-                self.show_log(chat_id, jobs[0].meta["session"])
+                self.show_log(chat_id, session)
         else:
             self.send_menu(chat_id)
+
+    def on_button(self, query: dict) -> None:
+        """Нажали ИНЛАЙН-кнопку под сообщением: делаем то же, что делает команда.
+
+        Чужой чат не обслуживаем, как и в обычных сообщениях. Подпись кнопки постоянного меню
+        приходит текстом и разбирается в handle() — оба пути ведут в do_action().
+        """
+        chat_id = ((query.get("message") or {}).get("chat") or {}).get("id")
+        data = (query.get("data") or "").strip()
+        if chat_id is None:
+            return
+        if not self.allowed(chat_id):
+            self.bot.answer(query.get("id", ""))          # пустой ответ: чужим — ничего
+            print(f"[bot] чужой чат {chat_id} нажал кнопку: не отвечаю", flush=True)
+            return
+        self.bot.answer(query.get("id", ""), "смотрю…")
+        self.do_action(chat_id, data)
 
     # ────────────────────────────── команды ──────────────────────────────
     def command(self, chat_id, text: str) -> None:
@@ -679,7 +755,7 @@ class App:
             self.bot.send(chat_id, f"⚠️ «{job.meta['name']}» не собралась.\n"
                                    f"{job.meta.get('note') or 'Причина неизвестна — смотрите журнал.'}\n\n"
                                    f"Повторить: /repeat {job.meta['session']} · журнал: "
-                                   f"/log {job.meta['session']}", buttons=FAILED_MENU)
+                                   f"/log {job.meta['session']}", buttons=failed_menu(job.meta["session"]))
 
 
 def main() -> int:
@@ -693,6 +769,9 @@ def main() -> int:
     except TelegramError as exc:
         print(f"Telegram не отвечает: {exc}", flush=True)
         return 3
+    # Команды видны кнопкой «☰» у поля ввода: без списка они есть, но о них надо помнить.
+    print("список команд у поля ввода: " + ("поставлен" if app.bot.set_commands(COMMANDS)
+                                            else "не поставился"), flush=True)
     for path in (app.jobs.books, app.jobs.results, app.jobs.jobs_dir):
         path.mkdir(parents=True, exist_ok=True)
     stale = app.jobs.fail_stale_queued()

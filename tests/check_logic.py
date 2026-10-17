@@ -71,11 +71,30 @@ keyboard_rows = jsonmod.loads(markup or "{}").get("inline_keyboard", [])
 check("клавиатура собирается как inline_keyboard",
       keyboard_rows and keyboard_rows[0][0]["callback_data"] == "status", markup[:80])
 check("пустые кнопки ничего не ломают", tgapi.keyboard(None) == "" and tgapi.keyboard([]) == "")
-menu_items = [item for row in botmod.MENU + botmod.FAILED_MENU for item in row]
+menu_items = [item for row in botmod.MENU + botmod.failed_menu("b0123456789") for item in row]
 check("в меню только короткие данные, понятные боту",
       bool(menu_items) and all(len(data.encode()) <= 64 and data for _, data in menu_items))
 check("меню закрывает базовое управление",
       {"status", "jobs", "login", "usage", "stop_ask"} <= {data for _, data in menu_items})
+
+# ── постоянное меню: клавиатура ПОД полем ввода, а не инлайн под сообщением ──
+persistent = jsonmod.loads(tgapi.reply_menu(botmod.REPLY_MENU) or "{}")
+flat_menu = [button["text"] for row in persistent.get("keyboard", []) for button in row]
+check("постоянное меню собирается как ReplyKeyboardMarkup с is_persistent",
+      persistent.get("is_persistent") is True and persistent.get("resize_keyboard") is True,
+      tgapi.reply_menu(botmod.REPLY_MENU)[:80])
+check("в постоянном меню есть все ходовые кнопки",
+      {"📊 Статус", "📋 Задания", "📜 Журнал", "📈 Остаток", "🔑 Войти в Colab",
+       "⏹ Остановить всё", "❓ Помощь"} <= set(flat_menu), str(flat_menu))
+check("пустое меню ничего не ломает", tgapi.reply_menu(None) == "" and tgapi.reply_menu([]) == "")
+check("подпись кнопки меню распознаётся и с эмодзи, и без",
+      botmod.menu_action("📊 Статус") == "status" and botmod.menu_action(" статус ") == "status"
+      and botmod.menu_action("Остановить всё") == "stop_ask")
+check("код авторизации кнопкой меню не считается",
+      botmod.menu_action("4/0AY0e-g7abcdefghijklmnopqrstuvwxyz1234567890") == ""
+      and botmod.menu_action("") == "")
+check("каждая подпись постоянного меню ведёт в действие",
+      all(botmod.menu_action(label) for label in flat_menu), str(flat_menu))
 
 
 # Нажатие кнопки должно доходить до дела — проверяем на живом App с «пустым» Telegram.
@@ -83,8 +102,10 @@ class FakeBot:
     def __init__(self):
         self.sent = []
 
-    def send(self, chat_id, text, preview=False, buttons=None):
-        self.sent.append((text, buttons))
+    def send(self, chat_id, text, preview=False, buttons=None, menu=None):
+        # Как настоящий Bot: клавиатура превращается в reply_markup тут же (tgapi) — тогда
+        # проверки видят ровно тот JSON, что ушёл бы в Telegram.
+        self.sent.append((text, tgapi.reply_menu(menu) if menu else tgapi.keyboard(buttons)))
         return True
 
     def answer(self, query_id, text=""):
@@ -96,6 +117,8 @@ app = botmod.App.__new__(botmod.App)                 # без __init__: сеть
 app.bot = FakeBot()
 app.jobs = Jobs(work / "btn-data", HERE / "pipeline", max_jobs=1, env=dict(os.environ))
 app.state = {"offset": 0, "owner": CHAT, "seen": []}
+app.menu_chats = set()                               # ставится в __init__, здесь его нет
+app.colab = type("Login", (), {"awaiting_code": lambda self: False})()
 
 
 def press(data: str) -> list:
@@ -112,7 +135,33 @@ confirm = press("stop_ask")
 check("остановка спрашивает подтверждение, а не рубит сразу",
       any(buttons and "stop_all" in str(buttons) for _, buttons in confirm))
 check("неизвестное нажатие возвращает меню",
-      any(buttons and "status" in str(buttons) for _, buttons in press("чужое")))
+      any(markup and ("status" in str(markup) or "is_persistent" in str(markup))
+          for _, markup in press("чужое")))
+check("кнопка журнала на несуществующую сборку не падает",
+      any("уже нет" in text for text, _ in press("log:no-such")))
+check("в кнопках неудачи зашита именно та сборка",
+      "repeat:b0123456789" in str(botmod.failed_menu("b0123456789"))
+      and "log:b0123456789" in str(botmod.failed_menu("b0123456789")))
+
+
+def press_text(text: str) -> list:
+    """Как нажатие кнопки ПОСТОЯННОГО меню: приходит обычным текстом, а не callback_query."""
+    app.bot.sent = []
+    app.handle({"update_id": 1, "message": {"message_id": 1, "chat": {"id": CHAT}, "text": text}})
+    return app.bot.sent
+
+
+app.menu_chats.clear()                                # как при первом сообщении после запуска бота
+first = press_text("📋 Задания")
+check("постоянное меню ставится при первом же сообщении",
+      any(markup and "is_persistent" in str(markup) for _, markup in first),
+      str(first[:1])[:120])
+check("подпись постоянного меню работает как команда",
+      any("Заданий" in text for text, _ in first), str(first)[:160])
+check("второй раз меню не переставляется (без спама)",
+      not any(markup and "is_persistent" in str(markup) for _, markup in press_text("📊 Статус")))
+check("«Остановить всё» из меню всё равно спрашивает подтверждение",
+      any(markup and "stop_all" in str(markup) for _, markup in press_text("⏹ Остановить всё")))
 
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"
