@@ -12,6 +12,15 @@ for _ in range(60):
         break
     time.sleep(2)
 
+# Ждём и отказа Colab на limit.epub: отчёт о нём приходит лишь после ближайшего опроса бота,
+# поэтому здесь не полагаемся на «уже успел» — дожидаемся статуса задания и перечитываем сообщения.
+for _ in range(60):
+    jobs = json.loads(urllib.request.urlopen(os.environ["WEB_BASE"] + "/api/jobs", timeout=30).read())
+    if any(item["name"] == "limit.epub" and item["status"] == "failed" for item in jobs):
+        texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
+        break
+    time.sleep(2)
+
 checks = [("по книге со страницы пришёл итог в Telegram (была жалоба: уведомления не было)",
            any("готова" in text for text in texts)),
           ("обёртка тоже писала о старте и о готовности (чат ей передан)",

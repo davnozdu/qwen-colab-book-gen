@@ -206,6 +206,11 @@ class Jobs:
     @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
               max_hours: float = 7.0, extra: list | None = None) -> None:
+        # Одна книга за раз — железно: Telegram и страница проверяют занятость по отдельности,
+        # но между проверкой и запуском есть окно. Здесь, под блокировкой, гонка закрыта.
+        live = [item for item in self.load() if item.status == "running" and self.alive(item)]
+        if len(live) >= self.max_jobs:
+            raise RuntimeError("сейчас идёт другая сборка — дождитесь её конца или остановите её")
         command = ([str(self.entry)] if self.entry else [sys_executable(), str(self.runner)]) + \
                   ["--session", job.meta["session"],
                    "--gpu", gpu, "--drive-dir", drive_dir, "--max-hours", str(max_hours),
@@ -269,6 +274,7 @@ class Jobs:
             done, status = os.waitpid(pid, os.WNOHANG)
             if done == pid:
                 job.meta["exit_code"] = os.waitstatus_to_exitcode(status)
+                job.save()                      # код возврата один раз запоминаем в meta
                 return False
             return True
         except ChildProcessError:
@@ -292,14 +298,8 @@ class Jobs:
         """Обновляет статусы: завершившиеся задания получают done или failed."""
         changed = {}
         for job in self.load():
-            if job.status == "queued":          # ещё не запускалось: пусть решает очередь
-                if time.time() - float(job.meta.get("created") or 0) > 3600:
-                    job.meta.update({"status": "failed", "finished": time.time(),
-                                     "note": "Задание так и не запустилось (бот перезапускали). "
-                                             "Нажмите «повторить» или /repeat."})
-                    job.save()
-                    changed[job.id] = job
-                continue
+            if job.status == "queued":          # ждёт своей очереди — застрявшие после
+                continue                        # перезапуска ловит fail_stale_queued() при старте
             if job.status != "running":
                 continue
             if self.alive(job):
@@ -315,7 +315,9 @@ class Jobs:
             else:
                 job.meta["status"] = "failed"
                 # Объясняем причину по-человечески: «все машины заняты, подождите» и т.п.
-                job.meta["note"] = diagnose(job.tail(20000)) or job.last_error() or "архива нет — смотрите лог"
+                # Уже записанную причину (например, ошибку tmux) не затираем.
+                job.meta["note"] = (job.meta.get("note") or diagnose(job.tail(20000))
+                                    or job.last_error() or "архива нет — смотрите лог")
             job.save()
             changed[job.id] = job
         return changed

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import email
 import html
+import shutil
 import json
+import os
 import pathlib
 import re
 import threading
@@ -26,6 +28,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PER_PAGE = 20
+MAX_UPLOAD = 200 * 1024 * 1024        # потолок книги со страницы: том не должен умереть от одного файла
 
 STYLE = """
  body { font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
@@ -444,6 +447,7 @@ class WebApp:
         folder = self.jobs.books if kind == "books" else self.jobs.results
         title = "Книги в папке books" if kind == "books" else "Готовые архивы в папке results"
         route = "/file/" if kind == "books" else "/result/"
+        base = "/files" if kind == "books" else "/results"
         files = list_files(folder)
         rows = []
         for path in page_slice(files, page):
@@ -462,7 +466,7 @@ class WebApp:
         return (f'<div class="card"><h2>{title}</h2>'
                 f'<div class="muted">Всего файлов: {len(files)}. Клик по имени — скачивание.</div>'
                 f'<table><tr><th>Файл</th><th>Размер</th><th>Изменён</th></tr>'
-                + "\n".join(rows) + "</table>" + pager(page, len(files), f"/{kind}") + "</div>")
+                + "\n".join(rows) + "</table>" + pager(page, len(files), base) + "</div>")
 
     # ────────────────────────────── файлы и действия ──────────────────────────────
     def send_file(self, folder: pathlib.Path, name: str, kind: str) -> tuple:
@@ -470,7 +474,8 @@ class WebApp:
         root = folder.resolve()
         if root != target.parent or not target.is_file():
             return 404, "text/plain; charset=utf-8", "файл не найден".encode(), {}
-        return (200, kind, target.read_bytes(),
+        # Отдаём сам путь: Handler читает файл потоком, в память архив целиком не тянем.
+        return (200, kind, target,
                 {"Content-Disposition": f'attachment; filename="{target.name}"'})
 
     def run_existing(self, name: str) -> tuple:
@@ -497,11 +502,16 @@ class WebApp:
             return self.redirect("/", "Файл не пришёл — выберите EPUB и повторите.")
         if not name.lower().endswith(".epub"):
             return self.redirect("/", "Нужен EPUB: конвейер режет и озвучивает именно его.")
+        if len(data) > MAX_UPLOAD:
+            return self.redirect("/", f"Файл больше {MAX_UPLOAD // 1024 // 1024} МБ — "
+                                       "положите его в папку books тома вручную.")
         if self.jobs.live_running():
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или остановите.")
         from jobs import safe_stem
         target = self.jobs.books / f"{safe_stem(name)}.epub"
-        target.write_bytes(data)
+        staging = target.with_name(f"{target.name}.upload-{os.urandom(4).hex()}")
+        staging.write_bytes(data)              # сначала целиком во временный файл…
+        staging.replace(target)                # …и только потом на место книги
         job = self.jobs.add(name, "web")
         job.meta["book"] = str(target)
         job.save()
@@ -569,15 +579,32 @@ class Handler(BaseHTTPRequestHandler):
         pass                                             # журнал доступа не нужен
 
     def _respond(self, method: str) -> None:
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_UPLOAD:
+            # Тело даже не читаем: не даём одному запросу утопить контейнер в памяти.
+            self._reply(413, "text/plain; charset=utf-8", "файл больше 200 МБ".encode(), {})
+            return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length else b""
             code, kind, payload, headers = self.app.route(
                 method, self.path, {}, self.headers.get("Content-Type", ""), body)
         except Exception as exc:                          # одна ошибка не должна ронять страницу
             code, kind, payload, headers = 500, "text/plain; charset=utf-8", str(exc).encode(), {}
+        self._reply(code, kind, payload, headers, method)
+
+    def _reply(self, code: int, kind: str, payload, headers: dict, method: str = "GET") -> None:
         self.send_response(code)
         self.send_header("Content-Type", kind)
+        if isinstance(payload, pathlib.Path):             # файл: отдаём потоком
+            size = payload.stat().st_size
+            self.send_header("Content-Length", str(size))
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.end_headers()
+            if method != "HEAD":
+                with payload.open("rb") as handle:
+                    shutil.copyfileobj(handle, self.wfile, 1 << 16)
+            return
         self.send_header("Content-Length", str(len(payload)))
         for key, value in headers.items():
             self.send_header(key, value)

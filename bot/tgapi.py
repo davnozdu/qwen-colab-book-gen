@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,14 +38,18 @@ class Bot:
     def call(self, method: str, payload: dict | None = None, timeout: int | None = None) -> dict:
         data = urllib.parse.urlencode(payload or {}).encode()
         request = urllib.request.Request(API.format(token=self.token, method=method), data=data)
-        try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
-                answer = json.load(response)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:300]
-            raise TelegramError(f"{method}: {detail}") from exc
-        except Exception as exc:                       # сеть, таймаут — не роняем бота
-            raise TelegramError(f"{method}: {exc}") from exc
+        for attempt in (1, 2):
+            try:
+                with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+                    answer = json.load(response)
+                break
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", "replace")[:300]
+                raise TelegramError(f"{method}: {detail}") from exc
+            except Exception as exc:
+                if attempt == 2:                      # сеть, таймаут — не роняем бота
+                    raise TelegramError(f"{method}: {exc}") from exc
+                time.sleep(1)                         # короткую сетевую осечку переигрываем
         if not answer.get("ok"):
             raise TelegramError(f"{method}: {answer.get('description')}")
         return answer.get("result") or {}

@@ -21,7 +21,13 @@ import signal
 import time
 
 URL_RE = re.compile(r"https://accounts\.google\.com/o/oauth2/[^\s]+")
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")      # цвета/курсив терминала не должны рвать ссылку
 CODE_HINT = "Enter the authorization code"
+
+
+def plain(buffer: str) -> str:
+    """Вывод терминала без ANSI-управляющих последовательностей: по нему ищем ссылку и приглашение."""
+    return ANSI_RE.sub("", buffer or "")
 
 
 class Login:
@@ -91,7 +97,7 @@ class Session:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             text = self.read(2.0)
-            found = URL_RE.search(text)
+            found = URL_RE.search(plain(self.buffer))
             if found:
                 return found.group(0)
             if not text and not self.alive():
@@ -102,11 +108,11 @@ class Session:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             text = self.read(2.0)
-            if CODE_HINT in self.buffer:
+            if CODE_HINT in plain(self.buffer):
                 return True
             if not text and not self.alive():
                 break
-        return CODE_HINT in self.buffer
+        return CODE_HINT in plain(self.buffer)
 
     def submit_code(self, code: str) -> None:
         os.write(self.master, (code.strip() + "\n").encode())
@@ -141,11 +147,16 @@ class Session:
         try:
             if self.alive():
                 os.killpg(self.pid, signal.SIGTERM)
+                time.sleep(0.1)
         except (ProcessLookupError, PermissionError, OSError):
             pass
         try:
             os.close(self.master)
         except OSError:
+            pass
+        try:
+            os.waitpid(self.pid, os.WNOHANG)     # забрать ребёнка: иначе он останется зомби
+        except (ChildProcessError, OSError):
             pass
 
     def summary(self) -> str:

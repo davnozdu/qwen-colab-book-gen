@@ -194,7 +194,6 @@ class App:
         self.username = ""
         self.jobs = Jobs(DATA, PIPELINE, max_jobs=MAX_JOBS)
         self.state = self.load_state()
-        self.pending_login = None       # чат, от которого ждём код авторизации
         self.colab = ColabLogin(pathlib.Path(TOKEN_FILE))
 
     # ────────────────────────────── состояние ──────────────────────────────
@@ -268,7 +267,6 @@ class App:
             # Код авторизации принимаем при любом открытом входе (и после /login в чате, и после
             # кнопки «войти» на странице). Но не всякий текст — иначе обычная фраза ломала вход.
             if looks_like_code(text):
-                self.pending_login = None
                 print("[bot] получен код авторизации, отправляю его CLI", flush=True)
                 self.bot.send(chat_id, "Код принят, проверяю…")
                 self.in_background(chat_id, lambda: self.colab.submit(text), "Вход в Colab")
@@ -382,7 +380,7 @@ class App:
         for job in jobs:
             self.stop_one(job)
         names = ", ".join(f"«{job.meta['name']}»" for job in jobs)
-        return (f"⏹ Остановлено заданий: {len(jobs)} — {names}.\\n"
+        return (f"⏹ Остановлено заданий: {len(jobs)} — {names}.\n"
                 f"Машины Colab освобождены, новые книги можно присылать.")
 
     def delete_job(self, chat_id, argument: str) -> None:
@@ -421,9 +419,6 @@ class App:
         """Вход запускаем в фоне: CLI отвечает не мгновенно, а чат ждать не должен."""
         self.bot.send(chat_id, "Начинаю вход в Google Colab, ссылка придёт через несколько секунд…")
         self.in_background(chat_id, self.colab.begin, "Вход в Colab")
-
-    def finish_login(self, code: str) -> None:
-        self.in_background(self.owner_chat(), lambda: self.colab.submit(code), "Вход в Colab")
 
     def owner_chat(self) -> str:
         """Кому писать: чат из настроек, иначе тот, кто первым написал боту."""

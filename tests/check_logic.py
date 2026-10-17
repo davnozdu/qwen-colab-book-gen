@@ -82,6 +82,28 @@ check("новых строк в журнале нет", done.log_payload(payload
 check("ссылка на Drive вытаскивается из журнала", any("/folders/" in url for url in done.drive_links()))
 check("задание удаляется из списка", "удалено" in jobs.delete(done) and not jobs.by_id(done.id))
 
+# ── одна книга за раз: повторный запуск при занятой машине не проходит (проверка в start()) ──
+data2 = work / "data2"
+jobs2 = Jobs(data2, pipeline, max_jobs=1, env=dict(os.environ, FAKE_SECONDS="30"))
+long_book = jobs2.books / "долгая.epub"
+long_book.write_bytes(b"PK long book")
+job2 = jobs2.add("долгая.epub", "test")
+job2.meta["book"] = str(long_book)
+job2.save()
+jobs2.start(job2, long_book)
+time.sleep(0.3)                                     # дать заглушке подняться
+second = jobs2.add("вторая.epub", "test")
+second.meta["book"] = str(long_book)
+second.save()
+raised = False
+try:
+    jobs2.start(second, long_book)
+except RuntimeError as exc:
+    raised = "идёт другая сборка" in str(exc)
+check("пока идёт сборка, вторую книгу запустить нельзя", raised)
+jobs2.stop(job2)                                    # прибираем: tmux-сессию и машину
+
+
 # ── незапустившееся задание не висит вечно ──
 lost = jobs.add("lost.epub", "test")
 check("застрявшее задание помечается неудачным", jobs.fail_stale_queued() == 1 and

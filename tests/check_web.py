@@ -3,7 +3,7 @@
 
 Запускается из smoke-теста: WEB_BASE — адрес страницы, WORK — каталог с данными (том).
 """
-import json, os, pathlib, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, pathlib, socket, sys, time, urllib.error, urllib.parse, urllib.request
 
 BASE = os.environ["WEB_BASE"].rstrip("/")     # адрес через опубликованный порт, не изнутри контейнера
 WORK = pathlib.Path(os.environ["WORK"])
@@ -77,6 +77,8 @@ check("каталог показывает не больше 20 записей",
 
 code, listing2 = get("/files?page=2")
 check("вторая страница каталога есть", code == 200 and "страница 2 из 2".encode() in listing2)
+check("пагинация ведёт на /files, а не в никуда (/books)",
+      b"/files?page=1" in listing2 and b"/books?page=" not in listing2)
 
 code, file_body = get("/file/probe-00.epub")
 check("клик по книге скачивает её", code == 200 and file_body.startswith(b"probe"))
@@ -99,6 +101,23 @@ for _ in range(30):
 web_job = next((item for item in jobs if item["name"] == "web-book.epub"), None)
 check("загруженная книга доехала до конца", bool(web_job) and web_job["status"] == "done",
       f"статус: {web_job['status'] if web_job else 'нет задания'}")
+
+# ── 3b. тело запроса больше потолка не читается вовсе (413) ─────────────
+host, port = urllib.parse.urlsplit(BASE).hostname, urllib.parse.urlsplit(BASE).port or 80
+sock = socket.create_connection((host, port), timeout=15)
+sock.sendall(b"POST /upload HTTP/1.1\r\nHost: test\r\n"
+             b"Content-Type: multipart/form-data; boundary=x\r\n"
+             b"Content-Length: 300000000\r\nConnection: close\r\n\r\n")
+reply = b""
+while True:
+    chunk = sock.recv(4096)
+    if not chunk:
+        break
+    reply += chunk
+sock.close()
+status_code = int(reply.split(b"\r\n")[0].split()[1]) if reply else 0
+check("запрос больше 200 МБ отклоняется сразу (413), тело не читается",
+      status_code == 413 and len(reply) < 4096, f"статус {status_code}, байт {len(reply)}")
 
 if web_job:
     code, log = get(f"/log/{web_job['session']}")
