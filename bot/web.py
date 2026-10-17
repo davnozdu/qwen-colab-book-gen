@@ -487,9 +487,7 @@ class WebApp:
         if self.jobs.live_running():
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
                                        "«остановить всё».")
-        job = self.jobs.add(book.name, "web")
-        job.meta["book"] = str(book)
-        job.save()
+        job = self.jobs.add(book.name, "web", book)
         self.launch_job(job)
         self.notify(f"🔁 Повторяю сборку «{book.name}» (запущено со страницы).")
         return self.redirect("/", f"Повторяю сборку «{book.name}» — о ходе напишу.")
@@ -513,9 +511,7 @@ class WebApp:
         staging = target.with_name(f"{target.name}.upload-{os.urandom(4).hex()}")
         staging.write_bytes(data)              # сначала целиком во временный файл…
         staging.replace(target)                # …и только потом на место книги
-        job = self.jobs.add(name, "web")
-        job.meta["book"] = str(target)
-        job.save()
+        job = self.jobs.add(name, "web", target)
         self.launch_job(job)
         self.notify(f"📖 Принял «{name}» ({len(data) / 1e6:.1f} МБ) — загружено со страницы, "
                     f"сборка пошла.")

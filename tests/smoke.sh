@@ -99,9 +99,15 @@ if ! python3 "$HERE/check_logic.py"; then fail=1; fi
 
 echo "книга отправлена, жду сборку…"
 feed "{\"update_id\":1,\"message\":{\"message_id\":1,\"chat\":{\"id\":$CHAT},\"document\":{\"file_id\":\"F1\",\"file_name\":\"smoke.epub\",\"file_size\":2048}}}"
-sleep 4
 
 # Пока книга собирается, вторую бот брать не должен: собираем по одной.
+# Вторую отправляем сразу, как первая начала сборку (обёртка пишет об этом в чат), а не по
+# фиксированной паузе: заглушка быстрая, и на паузе первая успевала закончиться — бот честно
+# принимал вторую, а проверка «одна книга за раз» падала на ровном месте.
+for _ in $(seq 1 40); do
+    if grep -q "Поднимаю машину Colab" "$STATE/sent.jsonl" 2>/dev/null; then break; fi
+    sleep 0.5
+done
 feed "{\"update_id\":9,\"message\":{\"message_id\":9,\"chat\":{\"id\":$CHAT},\"document\":{\"file_id\":\"F9\",\"file_name\":\"vtoraya.epub\",\"file_size\":2048}}}"
 sleep 4
 
@@ -171,6 +177,20 @@ sleep 14
 
 echo "--- проверки после повтора и остановки ---"
 if ! TG_STATE="$STATE" WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" python3 "$HERE/check_late.py"; then fail=1; fi
+
+echo "--- кнопки: статус, задания, остановка ---"
+# Нажатие кнопки приходит как callback_query — тот же путь, что у живого Telegram.
+BEFORE_BUTTONS=$(wc -l < "$STATE/sent.jsonl" | tr -d ' ')
+button() {
+    feed "{\"update_id\":$1,\"callback_query\":{\"id\":\"btn$1\",\"from\":{\"id\":$CHAT},\"message\":{\"message_id\":$1,\"chat\":{\"id\":$CHAT},\"text\":\"кнопка\"},\"data\":\"$2\"}}"
+}
+button 50 status
+sleep 4
+button 51 jobs
+sleep 4
+button 52 stop_ask
+sleep 4
+if ! TG_STATE="$STATE" BUTTONS_FROM="$BEFORE_BUTTONS" python3 "$HERE/check_buttons.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi

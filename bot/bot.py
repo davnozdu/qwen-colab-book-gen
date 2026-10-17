@@ -58,7 +58,19 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /help — эта подсказка
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
+Можно и кнопками: /start покажет меню — «Статус», «Задания», «Войти в Colab», «Остаток»,
+«Остановить всё».
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
+
+# Нижние кнопки под сообщениями: самые ходовые действия, чтобы не писать команды руками.
+MENU = [[("📊 Статус", "status"), ("📋 Задания", "jobs")],
+        [("🔑 Войти в Colab", "login"), ("📈 Остаток", "usage")],
+        [("⏹ Остановить всё", "stop_ask")],
+        [("❓ Помощь", "help")]]
+
+# Кнопки под отчётом о неудаче: сразу видно, что делать дальше.
+FAILED_MENU = [[("🔁 Повторить", "repeat"), ("📜 Журнал", "log")],
+               [("🏠 Меню", "menu")]]
 
 
 def looks_like_code(text: str) -> bool:
@@ -256,8 +268,8 @@ class App:
         if not permitted:                       # первый, кто написал, становится владельцем
             self.state["owner"] = str(chat_id)
             self.save_state()
-            self.bot.send(chat_id, "Вы назначены владельцем этого бота — дальше книги буду "
-                                   "принимать только от вас.\n\n" + HELP)
+            self.send_menu(chat_id, "Вы назначены владельцем этого бота — дальше книги буду "
+                                    "принимать только от вас.\n\n" + HELP)
             return True
         return str(chat_id) in permitted
 
@@ -291,6 +303,10 @@ class App:
                 self.launch(job)
 
     def handle(self, update: dict) -> None:
+        # Нажатие кнопки: отдельная ветка — у такого обновления нет ни текста, ни документа.
+        if update.get("callback_query"):
+            self.on_button(update["callback_query"])
+            return
         message = update.get("message") or update.get("edited_message") or {}
         chat_id = (message.get("chat") or {}).get("id")
         if chat_id is None:
@@ -328,7 +344,54 @@ class App:
             self.accept_document(chat_id, document)
             return
         if text:
-            self.bot.send(chat_id, HELP)
+            self.send_menu(chat_id)
+
+    # ────────────────────────────── кнопки ──────────────────────────────
+    def send_menu(self, chat_id, text: str = "") -> None:
+        """Помощь вместе с кнопками: команды помнить не обязательно."""
+        self.bot.send(chat_id, (text or HELP).strip(), buttons=MENU)
+
+    def on_button(self, query: dict) -> None:
+        """Нажали кнопку под сообщением: делаем то же, что делает команда.
+
+        В кнопках живут только «свои» действия — чужие данные игнорируем, а чужой чат
+        не обслуживаем, как и в обычных сообщениях.
+        """
+        chat_id = ((query.get("message") or {}).get("chat") or {}).get("id")
+        data = (query.get("data") or "").strip()
+        if chat_id is None:
+            return
+        if not self.allowed(chat_id):
+            self.bot.answer(query.get("id", ""), "Это бот владельца.")
+            return
+        self.bot.answer(query.get("id", ""), "смотрю…")
+        if data in ("help", "menu", ""):
+            self.send_menu(chat_id)
+        elif data == "status":
+            self.status(chat_id)
+        elif data == "jobs":
+            self.list_jobs(chat_id)
+        elif data == "login":
+            self.start_login(chat_id)
+        elif data == "usage":
+            self.show_usage(chat_id)
+        elif data == "stop_ask":                       # остановка «всё» — через подтверждение
+            self.bot.send(chat_id, "Остановить всё: текущую сборку и очередь, машины освободить?",
+                          buttons=[[("⏹ Да, остановить", "stop_all"), ("↩️ Отмена", "menu")]])
+        elif data == "stop_all":
+            self.bot.send(chat_id, "Останавливаю всё…")
+            self.in_background(chat_id, self.stop_all_jobs, "Остановка")
+        elif data in ("repeat", "log"):                # из отчёта о неудаче: последнее задание
+            jobs = self.jobs.load()
+            if not jobs:
+                self.bot.send(chat_id, "Заданий нет.")
+                return
+            if data == "repeat":
+                self.repeat_job(chat_id, jobs[0].meta["session"])
+            else:
+                self.show_log(chat_id, jobs[0].meta["session"])
+        else:
+            self.send_menu(chat_id)
 
     # ────────────────────────────── команды ──────────────────────────────
     def command(self, chat_id, text: str) -> None:
@@ -336,7 +399,7 @@ class App:
         head = parts[0].split("@")[0].lower()
         argument = parts[1] if len(parts) > 1 else ""
         if head in ("/start", "/help"):
-            self.bot.send(chat_id, HELP)
+            self.send_menu(chat_id)
         elif head == "/status":
             self.status(chat_id)
         elif head == "/jobs":
@@ -354,7 +417,7 @@ class App:
         elif head == "/usage":
             self.show_usage(chat_id)
         else:
-            self.bot.send(chat_id, "Не знаю такой команды.\n\n" + HELP)
+            self.send_menu(chat_id, "Не знаю такой команды.\n\n" + HELP)
 
     def status(self, chat_id) -> None:
         running = [job for job in self.jobs.load() if job.status == "running"]
@@ -369,18 +432,18 @@ class App:
         head = f"Сейчас: {len(running)} в работе, {len(queued)} в очереди."
         if not running and not queued:
             head = "Свободно: ничего не собирается."
-        self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""))
+        self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=MENU)
 
     def list_jobs(self, chat_id) -> None:
         jobs = self.jobs.load()[:10]
         if not jobs:
-            self.bot.send(chat_id, "Заданий пока не было.")
+            self.bot.send(chat_id, "Заданий пока не было.", buttons=MENU)
             return
         icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹"}
         lines = [f"{icons.get(job.status, '•')} {job.meta['name']} · {job.status}"
                  f"{' · ' + job.meta['note'][:60] if job.meta.get('note') and job.status == 'failed' else ''}"
                  f"\n   /log {job.meta['session']}" for job in jobs]
-        self.bot.send(chat_id, "\n".join(lines))
+        self.bot.send(chat_id, "\n".join(lines), buttons=MENU)
 
     def show_log(self, chat_id, argument: str) -> None:
         job = self.jobs.by_id(argument) if argument else None
@@ -388,9 +451,10 @@ class App:
             jobs = self.jobs.load()
             job = jobs[0] if jobs else None
         if job is None:
-            self.bot.send(chat_id, "Заданий нет. Укажите номер: /log <номер из /jobs>")
+            self.bot.send(chat_id, "Заданий нет. Укажите номер: /log <номер из /jobs>", buttons=MENU)
             return
-        self.bot.send(chat_id, f"Журнал «{job.meta['name']}» ({job.status}):\n\n" + (job.tail(3200) or "пусто"))
+        self.bot.send(chat_id, f"Журнал «{job.meta['name']}» ({job.status}):\n\n" + (job.tail(3200) or "пусто"),
+                      buttons=MENU)
 
     def stop_job(self, chat_id, argument: str) -> None:
         if not argument:                                  # /stop без номера — остановить всё
@@ -445,9 +509,7 @@ class App:
         if self.jobs.live_running():
             self.bot.send(chat_id, "Сейчас идёт другая сборка — сначала /stop или дождитесь её конца.")
             return
-        again = self.jobs.add(book.name, chat_id)
-        again.meta["book"] = str(book)
-        again.save()
+        again = self.jobs.add(book.name, chat_id, book)
         self.launch(again)
         self.bot.send(chat_id, f"🔁 Повторяю сборку «{book.name}» — о ходе напишу.")
 
@@ -535,12 +597,10 @@ class App:
             book = fresh
             print(f"[bot] не удалось сравнить книги ({exc}), работаю с копией {book.name}", flush=True)
         try:
-            job = self.jobs.add(name, chat_id)
+            job = self.jobs.add(name, chat_id, book)
         except Exception as exc:
             self.bot.send(chat_id, f"Не смог создать задание: {exc}")
             return
-        job.meta["book"] = str(book)
-        job.save()
         self.bot.send(chat_id, f"📖 Принял «{name}» ({book.stat().st_size / 1e6:.1f} МБ).\n"
                                "Запускаю сборку в фоне — о стадиях напишу сам.")
         self.launch(job)
@@ -590,13 +650,18 @@ class App:
             if links:
                 text.append("Google Drive:\n" + "\n".join(links))
             else:
-                text.append("Ссылок на Drive нет — похоже, доступ не подтверждали; архив лежит в томе.")
-            self.bot.send(chat_id, "\n\n".join(text))
+                # Не гадаем: показываем последнюю строку журнала про Drive — там причина
+                # («не подключился», «не скопировалось»), а не только наша догадка.
+                note = job.drive_note()
+                text.append("Ссылок на Drive нет — похоже, доступ не подтверждали; "
+                            "архив лежит в томе."
+                            + (f"\nЖурнал: {note}" if note else ""))
+            self.bot.send(chat_id, "\n\n".join(text), buttons=MENU)
         elif job.status == "failed":
             self.bot.send(chat_id, f"⚠️ «{job.meta['name']}» не собралась.\n"
                                    f"{job.meta.get('note') or 'Причина неизвестна — смотрите журнал.'}\n\n"
                                    f"Повторить: /repeat {job.meta['session']} · журнал: "
-                                   f"/log {job.meta['session']}")
+                                   f"/log {job.meta['session']}", buttons=FAILED_MENU)
 
 
 def main() -> int:

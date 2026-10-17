@@ -23,7 +23,9 @@ import subprocess
 import threading
 import time
 
-DRIVE_LINK_RE = re.compile(r"https://drive\.google\.com/(?:drive/folders|file/d)/[^\s)\]]+")
+DRIVE_LINK_RE = re.compile(
+    r"https://drive\.google\.com/(?:drive/folders|file/d|drive/search\?q=)[^\s)\]]+")
+DRIVE_LINE_RE = re.compile(r"(?i)^.*drive.*$")
 ZIP_RE = re.compile(r"(/[^\s]*\.zip)")
 ERROR_RE = re.compile(r"(?i)(Traceback|ошибка|не удалось|failed|error|не выдана|не поднялась)[^\n]{0,120}")
 
@@ -137,6 +139,18 @@ class Job:
         found = ERROR_RE.findall(self.tail(4000))
         return found[-1].strip() if found else ""
 
+    def drive_note(self) -> str:
+        """Что журнал в последний раз сказал про Google Drive.
+
+        Нужно, когда ссылок нет: по этой строке видно причину («не подключился», «не скопировалось»),
+        и в Telegram приходит не догадка, а слова самой обёртки.
+        """
+        for line in reversed(self.tail(20000).splitlines()):
+            cleaned = line.strip()
+            if cleaned and DRIVE_LINE_RE.match(cleaned) and "accounts.google.com" not in cleaned:
+                return cleaned[:200]
+        return ""
+
 
 class Jobs:
     """Пул заданий: одно за другим (у бесплатного тарифа нет двух GPU одновременно)."""
@@ -163,12 +177,14 @@ class Jobs:
 
     # ────────────────────────────── приём книги ──────────────────────────────
     @locked
-    def add(self, name: str, chat_id: str) -> Job:
+    def add(self, name: str, chat_id: str, book=None) -> Job:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         job_id = f"{stamp}-{os.urandom(2).hex()}"
         path = self.jobs_dir / job_id
         path.mkdir(parents=True, exist_ok=True)
-        meta = {"id": job_id, "session": session_name(job_id), "book": "", "name": name,
+        # Книгу записываем сразу при создании: пока задание «в очереди», его уже может
+        # подхватить очередь бота — и без готового пути к книге оно падало бы «файл пропал».
+        meta = {"id": job_id, "session": session_name(job_id), "book": str(book or ""), "name": name,
                 "chat_id": str(chat_id), "created": time.time(), "status": "queued", "started": None,
                 "finished": None, "pid": None, "note": ""}
         (path / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -206,9 +222,14 @@ class Jobs:
     @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
               max_hours: float = 7.0, extra: list | None = None) -> None:
-        # Одна книга за раз — железно: Telegram и страница проверяют занятость по отдельности,
-        # но между проверкой и запуском есть окно, а одно и то же задание могут запустить сразу
-        # два потока (страница + очередь бота). Здесь, под блокировкой, обе гонки закрыты.
+        # Статус берём с диска, а не из снимка в памяти: одно задание запускают двое —
+        # очередь бота (по своему списку) и страница, — а снимок успевает устареть.
+        # Второй запуск доходил до tmux и перебивал человеческое объяснение ошибки
+        # («tmux: duplicate session»), из-за чего в Telegram уходил отчёт без причины:
+        # так случайно падала сквозная проверка «про занятые машины написано понятно».
+        fresh = self.by_id(job.id)
+        if fresh is not None and fresh.status != "queued":
+            return                       # задание уже запущено или уже завершилось
         if job.status == "running" and self.alive(job):
             return                       # это задание уже идёт: повторный запуск ничего не делает
         live = [item for item in self.load() if item.id != job.id
@@ -232,7 +253,9 @@ class Jobs:
                                    str(self.pipeline), f"{shell} >> {_quote(str(log))} 2>&1"],
                                   capture_output=True, text=True, env=self.env)
             if done.returncode != 0:
-                job.meta["note"] = f"tmux: {done.stderr.strip()[:200]}"
+                # Ошибку tmux не ставим поверх уже записанной причины: объяснение для человека
+                # важнее служебной строки (иначе отчёт в Telegram уходит без причины).
+                job.meta["note"] = job.meta.get("note") or f"tmux: {done.stderr.strip()[:200]}"
         else:
             with log.open("ab") as handle:
                 process = subprocess.Popen(command, stdout=handle, stderr=handle,

@@ -12,7 +12,7 @@ sys.path.insert(0, str(HERE.parent / "bot"))
 
 import bot as botmod          # noqa: E402
 import web as webmod          # noqa: E402
-from jobs import Jobs, safe_stem  # noqa: E402
+from jobs import Jobs, safe_stem, DRIVE_LINK_RE  # noqa: E402
 
 results = []
 
@@ -57,6 +57,57 @@ check("занятые машины объясняются", "подождите"
 check("обрыв сессии объясняется", "прервал" in diagnose("RuntimeError: Connection was lost."))
 check("неизвестное не выдумываем", diagnose("что-то своё") == "")
 
+# ── кнопки: клавиатура, а не текст, и данные в пределах лимита Telegram (64 байта) ──
+import json as jsonmod        # noqa: E402
+import tgapi                  # noqa: E402
+markup = tgapi.keyboard([[("Статус", "status")], [("Повторить", "repeat")]])
+keyboard_rows = jsonmod.loads(markup or "{}").get("inline_keyboard", [])
+check("клавиатура собирается как inline_keyboard",
+      keyboard_rows and keyboard_rows[0][0]["callback_data"] == "status", markup[:80])
+check("пустые кнопки ничего не ломают", tgapi.keyboard(None) == "" and tgapi.keyboard([]) == "")
+menu_items = [item for row in botmod.MENU + botmod.FAILED_MENU for item in row]
+check("в меню только короткие данные, понятные боту",
+      bool(menu_items) and all(len(data.encode()) <= 64 and data for _, data in menu_items))
+check("меню закрывает базовое управление",
+      {"status", "jobs", "login", "usage", "stop_ask"} <= {data for _, data in menu_items})
+
+
+# Нажатие кнопки должно доходить до дела — проверяем на живом App с «пустым» Telegram.
+class FakeBot:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, chat_id, text, preview=False, buttons=None):
+        self.sent.append((text, buttons))
+        return True
+
+    def answer(self, query_id, text=""):
+        pass
+
+
+CHAT = "555"
+app = botmod.App.__new__(botmod.App)                 # без __init__: сеть и токен не нужны
+app.bot = FakeBot()
+app.jobs = Jobs(work / "btn-data", HERE / "pipeline", max_jobs=1, env=dict(os.environ))
+app.state = {"offset": 0, "owner": CHAT, "seen": []}
+
+
+def press(data: str) -> list:
+    app.bot.sent = []
+    app.on_button({"id": "q1", "data": data, "message": {"message_id": 1, "chat": {"id": CHAT}}})
+    return app.bot.sent
+
+
+check("кнопка «Задания» отвечает как команда /jobs",
+      any("Заданий" in text for text, _ in press("jobs")))
+check("кнопка «Статус» отвечает как /status",
+      any(("Свободно:" in text or "Сейчас:" in text) for text, _ in press("status")))
+confirm = press("stop_ask")
+check("остановка спрашивает подтверждение, а не рубит сразу",
+      any(buttons and "stop_all" in str(buttons) for _, buttons in confirm))
+check("неизвестное нажатие возвращает меню",
+      any(buttons and "status" in str(buttons) for _, buttons in press("чужое")))
+
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"
 pipeline = HERE / "pipeline"
@@ -80,6 +131,11 @@ payload = done.log_payload(0)
 check("журнал читается куском", payload["text"].startswith("==") and payload["offset"] > 0)
 check("новых строк в журнале нет", done.log_payload(payload["offset"])["text"] == "")
 check("ссылка на Drive вытаскивается из журнала", any("/folders/" in url for url in done.drive_links()))
+check("ссылка-поиск Drive тоже считается ссылкой",
+      bool(DRIVE_LINK_RE.search("папка: https://drive.google.com/drive/search?q=Книга")))
+check("ссылка на файл Drive распознаётся",
+      bool(DRIVE_LINK_RE.search("book.m4b: https://drive.google.com/file/d/1AbC/view")))
+check("причина про Drive берётся из журнала", "drive.google.com" in done.drive_note())
 check("задание удаляется из списка", "удалено" in jobs.delete(done) and not jobs.by_id(done.id))
 
 # ── одна книга за раз: повторный запуск при занятой машине не проходит (проверка в start()) ──

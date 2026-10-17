@@ -27,6 +27,16 @@ class TelegramError(RuntimeError):
     pass
 
 
+def keyboard(buttons) -> str:
+    """Инлайн-клавиатура для sendMessage: [[("подпись", "данные"), …], …] → reply_markup.
+
+    Кнопки важны для телефона: не нужно помнить команды — «Статус», «Задания», «Остановить».
+    """
+    rows = [[{"text": label, "callback_data": data} for label, data in row]
+            for row in (buttons or []) if row]
+    return json.dumps({"inline_keyboard": rows}, ensure_ascii=False) if rows else ""
+
+
 class Bot:
     def __init__(self, token: str, timeout: int = 60):
         self.token = token.strip()
@@ -58,13 +68,27 @@ class Bot:
         return self.call("getMe").get("username", "")
 
     # ────────────────────────────── сообщения ──────────────────────────────
-    def send(self, chat_id, text: str, preview: bool = False) -> bool:
+    def send(self, chat_id, text: str, preview: bool = False, buttons=None) -> bool:
+        payload = {"chat_id": str(chat_id), "text": text[:4000],
+                   "disable_web_page_preview": "true" if not preview else "false"}
+        markup = keyboard(buttons)
+        if markup:
+            payload["reply_markup"] = markup
         try:
-            self.call("sendMessage", {"chat_id": str(chat_id), "text": text[:4000],
-                                      "disable_web_page_preview": "true" if not preview else "false"})
+            self.call("sendMessage", payload)
             return True
-        except TelegramError:
+        except TelegramError as exc:
+            # Молча терять отчёт нельзя: без строки в журнале потом не понять, почему в чате
+            # пусто (а проверка, которая ждёт сообщение, падает без улик).
+            print(f"[tg] сообщение не ушло в {chat_id}: {exc}", flush=True)
             return False
+
+    def answer(self, query_id: str, text: str = "") -> None:
+        """Отклик на нажатие кнопки: без него Telegram держит «часики» на кнопке."""
+        try:
+            self.call("answerCallbackQuery", {"callback_query_id": query_id, "text": text[:200]})
+        except TelegramError:
+            pass
 
     def updates(self, offset: int, wait: int = 50):
         try:

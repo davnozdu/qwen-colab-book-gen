@@ -83,7 +83,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "result": answer})
 
         if method == "sendMessage":
-            line = json.dumps({"chat_id": flat.get("chat_id"), "text": flat.get("text")},
+            line = json.dumps({"chat_id": flat.get("chat_id"), "text": flat.get("text"),
+                               "buttons": flat.get("reply_markup") or "",
+                               "preview": flat.get("disable_web_page_preview") or ""},
                               ensure_ascii=False)
             with (STATE / "sent.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
