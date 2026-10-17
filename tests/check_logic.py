@@ -113,12 +113,28 @@ class FakeBot:
 
 
 CHAT = "555"
+
+
+class FakeLogin:
+    """Заглушка входа в Colab: считает сбросы, чтобы проверка видела, что он ДЕЙСТВИТЕЛЬНО был."""
+
+    def __init__(self):
+        self.resets = 0
+
+    def awaiting_code(self):
+        return False
+
+    def reset(self):
+        self.resets += 1
+        return "Сброс полный: отложены token.json, sessions.json."
+
+
 app = botmod.App.__new__(botmod.App)                 # без __init__: сеть и токен не нужны
 app.bot = FakeBot()
 app.jobs = Jobs(work / "btn-data", HERE / "pipeline", max_jobs=1, env=dict(os.environ))
 app.state = {"offset": 0, "owner": CHAT, "seen": []}
 app.menu_chats = set()                               # ставится в __init__, здесь его нет
-app.colab = type("Login", (), {"awaiting_code": lambda self: False})()
+app.colab = FakeLogin()
 
 
 def press(data: str) -> list:
@@ -162,6 +178,33 @@ check("второй раз меню не переставляется (без с
       not any(markup and "is_persistent" in str(markup) for _, markup in press_text("📊 Статус")))
 check("«Остановить всё» из меню всё равно спрашивает подтверждение",
       any(markup and "stop_all" in str(markup) for _, markup in press_text("⏹ Остановить всё")))
+
+# ── сброс входа в Colab: в вебе кнопка была, в Telegram её не было ──
+check("подпись «Сбросить вход» распознаётся",
+      botmod.menu_action("🚪 Сбросить вход") == "reset_ask"
+      and botmod.menu_action("сбросить авторизацию") == "reset_ask"
+      and botmod.menu_action("сменить аккаунт") == "reset_ask")
+check("сброс есть и в постоянном меню, и в инлайн-меню",
+      "🚪 Сбросить вход" in flat_menu
+      and any(data == "reset_ask" for row in botmod.MENU for _, data in row)
+      and any(name == "logout" for name, _ in botmod.COMMANDS))
+
+app.colab.resets = 0
+ask = press("reset_ask")
+check("сброс спрашивает подтверждение, а не рвёт вход сразу",
+      any(markup and "reset_do" in str(markup) for _, markup in ask) and app.colab.resets == 0,
+      str(ask)[:160])
+press_text("/logout")                                # команда ведёт туда же
+check("команда /logout тоже просит подтверждение",
+      any(markup and "reset_do" in str(markup) for _, markup in app.bot.sent)
+      and app.colab.resets == 0)
+press("reset_do")
+deadline = time.time() + 5
+while time.time() < deadline and app.colab.resets == 0:       # сброс идёт в отдельном потоке
+    time.sleep(0.1)
+check("подтверждение действительно сбрасывает вход",
+      app.colab.resets == 1 and any("Сброс" in text for text, _ in app.bot.sent),
+      str(app.bot.sent)[:160])
 
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"

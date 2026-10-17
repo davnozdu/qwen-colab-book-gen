@@ -192,6 +192,10 @@ button 51 jobs
 sleep 4
 button 52 stop_ask
 sleep 4
+# Сброс входа: проверяем, что в Telegram он есть и просит подтверждение (сам сброс не нажимаем,
+# иначе тест снесёт вход, который нужен проверкам входа выше).
+button 53 reset_ask
+sleep 4
 if ! TG_STATE="$STATE" BUTTONS_FROM="$BEFORE_BUTTONS" python3 "$HERE/check_buttons.py"; then fail=1; fi
 
 echo "--- проверяю веб-страницу ---"

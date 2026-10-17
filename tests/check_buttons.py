@@ -26,6 +26,9 @@ checks = [
      any(("/log " in text or "· done" in text or "Заданий" in text) for text in texts)),
     ("остановка просит подтверждение",
      any("Остановить всё" in text for text in texts)),
+    ("сброс входа есть в Telegram и просит подтверждение",
+     any("Сбросить вход в Google Colab" in text for text in texts)
+     and any("reset_do" in markup for markup in menus)),
     ("кнопки приходят как клавиатура, а не текстом",
      any("Остановить всё" in markup for markup in menu_with_buttons)
      and not any("inline_keyboard" in text for text in texts)),
