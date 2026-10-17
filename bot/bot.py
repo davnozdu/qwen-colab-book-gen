@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import threading
@@ -153,21 +154,60 @@ class ColabLogin:
         return "Не получилось войти. Ответ CLI:\n" + (session.summary() or answer[-300:])
 
     def reset(self) -> str:
+        """Полный сброс входа Colab: откладываем token.json И остальное состояние CLI.
+
+        Один token.json мультиаккаунт не лечит: sessions.json держит машины, history — журнал,
+        а главное — новый вход должен совпасть с аккаунтом, под которым вы подтверждаете Drive.
+        Поэтому сбрасываем всю папку настроек CLI, чтобы всё применилось заново.
+        """
         if self.session:
             self.session.close()
             self.session, self.url = None, ""
-        if not self.token_file.exists():
+        config_dir = self.token_file.parent
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        backed = []
+        for path in (self.token_file, config_dir / "sessions.json",
+                     config_dir / "settings.json", config_dir / "history"):
+            if not path.exists():
+                continue
+            backup = path.with_name(f"{path.name}.backup-{stamp}")
+            try:
+                path.rename(backup)
+                backed.append(path.name)
+            except OSError as exc:
+                return f"Не смог отложить {path.name}: {exc}"
+        if not backed:
             self.note = "входа и не было"
             return "Входа и не было — можно сразу входить заново."
-        backup = self.token_file.with_name(
-            f"{self.token_file.name}.backup-{time.strftime('%Y%m%d-%H%M%S')}")
+        stopped = self._stop_colab_sessions()
+        self.note = "вход и состояние CLI сброшены: " + ", ".join(backed)
+        return ("Сброс полный: отложены " + ", ".join(backed) + ".\n"
+                + stopped +
+                "Теперь нажмите «войти» и войдите заново. ВАЖНО: и вход в Colab, и подтверждение "
+                "доступа к Google Drive проходите под ОДНИМ аккаунтом Google — иначе Google снова "
+                "отклонит подключение Drive (ошибка 400).")
+
+    def _stop_colab_sessions(self) -> str:
+        """Гасим свои сессии Colab, пока вход ещё жив: со сброшенным токеном их уже не остановить."""
+        binary = shutil.which("colab")
+        if not binary:
+            return ""
         try:
-            self.token_file.rename(backup)
-        except OSError as exc:
-            return f"Не смог отложить текущий вход: {exc}"
-        self.note = f"вход отложен как {backup.name}"
-        return (f"Вход сброшен: старый token.json лежит рядом как {backup.name}. "
-                f"Дальше нажмите «войти» и войдите заново (можно другим аккаунтом).")
+            done = subprocess.run([binary, "sessions"], capture_output=True, text=True,
+                                  timeout=60, env=dict(os.environ))
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+        stopped = []
+        for name in re.findall(r"^\[([^\]?]*)\]\s+\S+\s+\|", done.stdout or "", re.M):
+            if not name:
+                continue
+            try:
+                subprocess.run([binary, "stop", "-s", name], capture_output=True, text=True,
+                               timeout=120, env=dict(os.environ))
+                stopped.append(name)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+        return ("остановлены сессии Colab: " + ", ".join(stopped) + ".\n") if stopped else ""
 
     def usage(self) -> str:
         binary = shutil.which("colab")
