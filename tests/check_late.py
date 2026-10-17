@@ -17,9 +17,17 @@ for _ in range(60):
 for _ in range(60):
     jobs = json.loads(urllib.request.urlopen(os.environ["WEB_BASE"] + "/api/jobs", timeout=30).read())
     if any(item["name"] == "limit.epub" and item["status"] == "failed" for item in jobs):
-        texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
         break
     time.sleep(2)
+
+# Статус в meta.json и сообщение в Telegram пишутся в одном такте бота, но читаются из разных
+# файлов: между «увидели failed» и «долетело sent.jsonl» может быть мгновение. Дожидаемся самого
+# сообщения, а не полагаемся на то, что оно уже здесь.
+for _ in range(10):
+    texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
+    if any(("заняты" in text or "подождите" in text) for text in texts):
+        break
+    time.sleep(1)
 
 checks = [("по книге со страницы пришёл итог в Telegram (была жалоба: уведомления не было)",
            any("готова" in text for text in texts)),

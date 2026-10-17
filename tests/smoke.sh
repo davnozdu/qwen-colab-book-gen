@@ -26,6 +26,12 @@ WEB_PORT="${WEB_PORT:-8090}"      # локальный запуск: без пр
 OUT_PORT="${OUT_PORT:-9090}"      # контейнер: снаружи 9090 → внутри 8090
 
 cleanup() {
+    if [ "${RUN_LOCAL:-0}" = "1" ]; then
+        # Сабшелл-обёрку kill может не тронуть бота внутри (он её ребёнок, а не она): гасим
+        # по имени процесса, иначе следующий локальный прогон упадёт на занятом порту 8090.
+        pkill -f "[b]ot.py" 2>/dev/null || true
+        pkill -f "tg_stub.py" 2>/dev/null || true
+    fi
     if [ -n "${BOT_PID:-}" ]; then kill "$BOT_PID" 2>/dev/null || true; fi
     if [ -n "${STUB_PID:-}" ]; then kill "$STUB_PID" 2>/dev/null || true; fi
     if [ "${RUN_LOCAL:-0}" != "1" ]; then
