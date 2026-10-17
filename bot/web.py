@@ -62,9 +62,12 @@ STYLE = """
 """
 
 SCRIPT = """
-// Обновляем страницу, чтобы видеть ход сборки, но не мешаем вводить код авторизации.
+// Обновляем страницу, чтобы видеть ход сборки, но не мешаем вводить код авторизации
+// и не перезагружаем живой журнал: у него своя подгрузка, а перезагрузка сбрасывала
+// прокрутку наверх — пользователь видел начало журнала вместо последних событий.
 setTimeout(function () {
-  if (!document.querySelector('input[name=code]')) { location.reload(); }
+  const busy = document.querySelector('input[name=code]') || document.getElementById('log');
+  if (!busy) { location.reload(); }
 }, 5000);
 """
 
@@ -399,6 +402,14 @@ class WebApp:
                 f'const pre = document.getElementById("log");'
                 f'const st = document.getElementById("status");'
                 f'let offset = {payload["offset"]};'
+                # Последние события показываем сразу (хвост внизу), и держим хвост внизу,
+                # пока пользователь сам не отлистал вверх: тогда «за нами» не тянет.
+                f'let follow = true;'
+                f'function toBottom() {{ pre.scrollTop = pre.scrollHeight; }}'
+                f'pre.addEventListener("scroll", function () {{'
+                f'  follow = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;'
+                f'}});'
+                f'toBottom();'
                 f'async function pull() {{'
                 f'  try {{'
                 f'    const r = await fetch("/log/{job.meta["session"]}/tail?offset=" + offset,'
@@ -406,9 +417,8 @@ class WebApp:
                 f'    if (r.ok) {{'
                 f'      const j = await r.json();'
                 f'      if (j.text) {{'
-                f'        const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;'
                 f'        pre.textContent += j.text; offset = j.offset;'
-                f'        if (stick) {{ pre.scrollTop = pre.scrollHeight; }}'
+                f'        if (follow) {{ toBottom(); }}'
                 f'      }}'
                 f'      st.textContent = j.status + " · " + j.elapsed;'
                 f'    }}'

@@ -124,6 +124,12 @@ if web_job:
     check("журнал задания открывается", code == 200 and "готово".encode() in log)
     check("журнал живой: страница сама подтягивает строки",
           b"/tail?offset=" in log and b"setTimeout(pull" in log)
+    # Прокрутка: страница должна показывать ПОСЛЕДНИЕ события. Раньше прокрутку сбивало
+    # общее авто-обновление страницы каждые 5 секунд — оно поднимало журнал в начало.
+    check("журнал держится за последние события, а не за начало",
+          b"toBottom()" in log and b"let follow = true" in log)
+    check("живой журнал не перезагружается целиком каждые 5 секунд",
+          b"getElementById('log')" in log)
     code, tail = get(f"/log/{web_job['session']}/tail?offset=0")
     payload = json.loads(tail) if code == 200 else {}
     check("хвост журнала отдаётся куском json",
