@@ -517,6 +517,13 @@ class App:
             job.save()
             self.report(job)
             return
+        # Задание могло прийти со страницы — там чата нет. Подставляем владельца, иначе
+        # об итоге и о стадиях никто не узнает (была именно такая жалоба).
+        if not job.meta.get("chat_id"):
+            owner = self.owner_chat()
+            if owner:
+                job.meta["chat_id"] = owner
+                job.save()
         try:
             self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
         except Exception as exc:
@@ -525,8 +532,11 @@ class App:
             self.report(job)
 
     def report(self, job) -> None:
-        chat_id = job.meta.get("chat_id")
+        # Пишем владельцу и для заданий, запущенных со страницы (у них нет своего чата).
+        chat_id = str(job.meta.get("chat_id") or "").strip() or self.owner_chat()
         if not chat_id:
+            print(f"[bot] об итоге «{job.meta.get('name')}» сообщить некому: "
+                  f"нет ни чата задания, ни владельца", flush=True)
             return
         minutes = ((job.meta.get("finished") or time.time()) - (job.meta.get("started") or time.time())) / 60
         if job.status == "done":

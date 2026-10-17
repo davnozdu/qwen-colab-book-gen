@@ -1,11 +1,23 @@
 #!/usr/bin/env python3
 """Проверки после повтора генерации, остановки всего и отказа Colab (см. smoke.sh)."""
-import json, os, pathlib, sys, urllib.request
+import json, os, pathlib, sys, time, urllib.request
 
 state = pathlib.Path(os.environ["TG_STATE"])
 texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
 jobs = json.loads(urllib.request.urlopen(os.environ["WEB_BASE"] + "/api/jobs", timeout=30).read())
-checks = [("чужому чату бот ничего не даёт",
+# Ждём итог по книге, запущенной СО СТРАНИЦЫ: именно о ней раньше не приходило уведомление.
+for _ in range(60):
+    texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
+    if any("готова" in text for text in texts):
+        break
+    time.sleep(2)
+
+checks = [("по книге со страницы пришёл итог в Telegram (была жалоба: уведомления не было)",
+           any("готова" in text for text in texts)),
+          ("обёртка тоже писала о старте и о готовности (чат ей передан)",
+           any("Поднимаю машину Colab" in text for text in texts)
+           and any("Книга собрана" in text for text in texts)),
+          ("чужому чату бот ничего не даёт",
            any("Это бот владельца" in text for text in texts)
            and not any(item["name"] == "chuzhaya.epub" for item in jobs)),
           ("повтор генерации запускается", any("Повторяю сборку «smoke.epub»" in text for text in texts)),

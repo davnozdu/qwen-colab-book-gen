@@ -210,6 +210,11 @@ class Jobs:
                   ["--session", job.meta["session"],
                    "--gpu", gpu, "--drive-dir", drive_dir, "--max-hours", str(max_hours),
                    "--out-dir", str(self.results), "--no-caffeinate", "--stop-on-failure", str(book)]
+        # Чат владельца: без него обёртка не сможет писать о стадиях и о готовой книге
+        # (ключ она берёт из переменной окружения, в командную строку секреты не попадают).
+        chat = str(job.meta.get("chat_id") or "").strip()
+        if chat:
+            command.extend(["--telegram-chat", chat])
         command.extend(extra or [])
         log = job.log
         if self.has_tmux:
