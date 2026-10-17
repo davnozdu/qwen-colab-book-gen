@@ -6,6 +6,10 @@ on:
     branches: [main]
     paths-ignore: ["README.md", "LICENSE"]
   workflow_dispatch:
+  # Ручной/автоматический пересбор из davnozdu/qwen-epub-audiobook
+  # (там push -> workflow -> repository_dispatch сюда).
+  repository_dispatch:
+    types: [rebuild]
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
