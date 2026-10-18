@@ -144,9 +144,12 @@ if web_job:
           b"getElementById('log')" in log)
     code, tail = get(f"/log/{web_job['session']}/tail?offset=0")
     payload = json.loads(tail) if code == 200 else {}
+    # Первой строкой в журнале теперь идёт строка режима (её пишет бот перед запуском), поэтому
+    # проверяем не «начинается с баннера», а что хвост отдаётся и баннер обёртки в нём есть.
     check("хвост журнала отдаётся куском json",
-          code == 200 and payload.get("text", "").startswith("==") and payload.get("status") == "done",
-          f"код {code}, статус {payload.get('status')}")
+          code == 200 and payload.get("status") == "done"
+          and "==" in payload.get("text", ""),
+          f"код {code}, статус {payload.get('status')}, начало: {payload.get('text', '')[:40]!r}")
     code, tail2 = get(f"/log/{web_job['session']}/tail?offset={payload.get('offset', 0)}")
     check("новых строк нет — приходит пусто",
           code == 200 and json.loads(tail2).get("text") == "")
@@ -213,13 +216,16 @@ check("неправильный порог не применяется — ре�
 code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "1.5"})     # флажок снят
 after = get("/")[1]
 check("снятый флажок выключает копирование на Google Drive",
-      "Google Drive: нет".encode() in after and "режим «одна книга целиком»".encode() in after)
+      "Google Drive: нет".encode() in after
+      and "режим «одна книга целиком, без нарезки»".encode() in after)
 check("настройки легли в том (переживут обновление образа)",
       (WORK / "data" / "settings.json").is_file()
       and json.loads((WORK / "data" / "settings.json").read_text(encoding="utf-8"))["mode"] == "book")
 post_form("/settings", {"mode": "book", "parts_hours": "1.5", "drive": "on"})   # вернуть как было
 
-check("что нажали на странице, ушло в Telegram", "Настройки со страницы" in sent_text)
+# Журнал заглушки читаем заново: он снят раньше, а настройки сохранялись уже после этого.
+fresh_sent = sent_path.read_text(encoding="utf-8") if sent_path.exists() else ""
+check("что нажали на странице, ушло в Telegram", "Настройки со страницы" in fresh_sent)
 
 bad = [name for name, ok in results if not ok]
 
