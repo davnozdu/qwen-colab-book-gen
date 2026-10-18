@@ -151,7 +151,7 @@ class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
-                 notify=None, settings=None, chains=None, continue_chain=None):
+                 notify=None, settings=None, chains=None, continue_chain=None, glue=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -166,6 +166,7 @@ class WebApp:
         # Цепочки частей: страница показывает части книги и кнопку «продолжить генерацию».
         self.chains = chains
         self.continue_chain = continue_chain or (lambda chain_id: "Продолжение недоступно.")
+        self.glue = glue or (lambda chain_id: "Сборка книги недоступна.")
         self.last_message = ""
 
     # ────────────────────────────── запросы ──────────────────────────────
@@ -277,6 +278,12 @@ class WebApp:
             return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
+        if method == "POST" and parsed.path.startswith("/chain/final/"):
+            chain = urllib.parse.unquote(parsed.path.split("/chain/final/", 1)[1])
+            message = self.glue(chain)
+            self.last_message = message
+            self.notify(f"Сборка книги со страницы: {message}")
+            return self.redirect("/", message)
         if method == "POST" and parsed.path.startswith("/chain/continue/"):
             chain = path_las(parsed.path)
             message = self.continue_chain(chain)
@@ -400,6 +407,13 @@ class WebApp:
                 resume = ('<form class="inline" method="post" action="/chain/continue/'
                           + chain.id + '"><button type="submit" title="Продолжить с первой неготовой '
                           'части: готовые не трогаем">продолжить генерацию</button></form>')
+                ready = [part for part in chain.parts if part.get("status") == "done"]
+                if chain.parts and len(ready) == len(chain.parts) and chain.status != "gluing":
+                    # Все части на месте → финал запускается сам; кнопка нужна, если он не дошёл
+                    # (например, контейнер перезапускали ровно в этот момент).
+                    resume += ('<form class="inline" method="post" action="/chain/final/'
+                               + chain.id + '"><button type="submit" title="Склейка, громкость по всей '
+                               'книге, музыка и сборка — здесь, в контейнере">собрать книгу</button></form>')
             cards.append(f'<div class="card"><h2>Книга по частям: '
                          f'{html.escape(str(chain.meta.get("name") or ""))}</h2>'
                          f'<div class="muted">{html.escape(chain.summary())} · порог '

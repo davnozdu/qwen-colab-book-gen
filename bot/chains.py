@@ -18,7 +18,8 @@ import time
 
 SPLIT = "split"              # книга режется на части
 RUNNING = "running"          # части собираются
-DONE = "done"                # все части готовы
+GLUING = "gluing"            # части готовы, книга собирается в контейнере
+DONE = "done"                # книга собрана
 FAILED = "failed"            # цепочка встала и ждёт человека
 
 PART_QUEUED = "queued"
@@ -275,4 +276,8 @@ class Chains:
                 if str(pathlib.Path(chain.meta.get("book") or "").resolve()) == target]
 
     def active(self) -> list:
-        return [chain for chain in self.load() if chain.status in (SPLIT, RUNNING, FAILED)]
+        return [chain for chain in self.load() if chain.status in (SPLIT, RUNNING, GLUING, FAILED)]
+
+    def gluing(self) -> list:
+        """Цепочки, у которых все части готовы и идёт сборка книги."""
+        return [chain for chain in self.load() if chain.status == GLUING]

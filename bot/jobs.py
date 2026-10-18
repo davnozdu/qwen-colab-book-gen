@@ -407,6 +407,27 @@ class Jobs:
         job.meta.update({"book": str(book), "status": "running", "started": time.time()})
         job.save()
 
+    @locked
+    def start_local(self, job: Job, script: pathlib.Path, arguments: list) -> None:
+        """Местный шаг в контейнере (сборка книги из частей): машину не занимает, облако не трогает.
+
+        Это то же, что делает машина на стадиях громкости, музыки и сборки, только на склеенном
+        сырье и без GPU. Процесс живёт независимо от бота (start_new_session), поэтому перезапуск
+        контейнера его не обрывает на середине, а журнал пишется туда же, где у остальных заданий.
+        """
+        script = pathlib.Path(script)
+        if not script.is_file():
+            raise RuntimeError(f"нет скрипта {script}")
+        command = [sys_executable(), str(script)] + [str(item) for item in arguments]
+        log = job.log
+        with log.open("ab") as handle:
+            process = subprocess.Popen(command, stdout=handle, stderr=handle,
+                                       stdin=subprocess.DEVNULL, start_new_session=True,
+                                       env=self.env, cwd=str(script.parent))
+        job.meta.update({"status": "running", "started": time.time(), "pid": process.pid,
+                         "local": True})
+        job.save()
+
     # ────────────────────────────── состояние ──────────────────────────────
     def load(self) -> list:
         jobs = []

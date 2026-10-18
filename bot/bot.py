@@ -482,14 +482,109 @@ class App:
                     return
 
             if chain.all_done() and chain.status != chains.DONE:
-                chain.finish()
-                ready = len([part for part in chain.parts if part.get("result")])
-                note = (f"все части готовы ({ready} из {chain.meta.get('total')}). "
-                        f"Склейка в одну книгу — следующий шаг, части пока лежат архивами.")
-                job.meta.update({"status": "waiting", "note": note})
-                job.save()
-                job.log_line(note)
-                self.send_to_job_chat(job, f"✅ «{job.meta['name']}»: {note}")
+                self.finish_chain(chain, job)
+                return
+
+    def parts_dir(self, chain) -> pathlib.Path:
+        """Сырьё частей в томе: переживёт и перезапуск бота, и обновление образа."""
+        return DATA / "parts" / str(chain.id)
+
+    def parts_line(self, chain, index) -> str:
+        return (f"режим частей: часть {index} из {chain.meta.get('total') or '?'} — на машину "
+                f"только синтез, громкость, музыка и сборка будут в контейнере")
+
+    def finish_chain(self, chain, job) -> None:
+        """Все части готовы → финал: склейка, громкость по всей книге, музыка, сборка — в контейнере."""
+        final = self.jobs.by_id(chain.meta.get("final_job") or "")
+        if final is None:
+            self.start_glue(chain, job)
+            return
+        if final.status in ("queued", "running"):
+            return                                  # сборка идёт: следим дальше
+        if final.status == "done":
+            chain.finish()
+            result = final.meta.get("result") or ""
+            note = (f"книга собрана из {chain.meta.get('total')} частей"
+                    + (f": {pathlib.Path(result).name}" if result else "")
+                    + ". Сырьё частей осталось в томе: фильтр, громкость или музыку можно переделать "
+                      "и собрать книгу заново, не трогая облако.")
+            job.meta.update({"status": "done", "finished": time.time(), "note": note, "result": result})
+            job.save()
+            job.log_line(note)
+            self.send_to_job_chat(job, f"✅ «{job.meta['name']}»: {note}")
+            return
+        reason = (f"сборка книги не удалась: {final.meta.get('note') or 'смотрите журнал сборки'}. "
+                  f"Части целы — на странице есть «собрать книгу».")
+        chain.hold(reason)
+        job.meta.update({"status": "waiting", "note": reason})
+        job.save()
+        job.log_line(reason)
+        self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}")
+
+    def start_glue(self, chain, job) -> None:
+        """Запускает сборку книги из готовых частей. Повторный вызов только следит, не запускает второй раз."""
+        running = self.jobs.by_id(chain.meta.get("final_job") or "")
+        if running is not None and running.status in ("queued", "running"):
+            return
+        glue = PIPELINE / "glue_book.py"
+        parts_dir = self.parts_dir(chain)
+        final = self.jobs.add(f"{job.meta.get('name')} — сборка книги",
+                              job.meta.get("chat_id") or self.owner_chat(),
+                              pathlib.Path(chain.meta["book"]))
+        final.meta.update({"chain": chain.id, "glue": True,
+                           "parts_total": chain.meta.get("total"), "parts_done": chain.meta.get("total")})
+        final.log_line(f"сборка книги из {chain.meta.get('total')} частей: склейка, громкость по всей "
+                       f"книге, музыка, m4b и read-along — здесь, в контейнере, без облака")
+        final.save()
+        chain.meta["final_job"] = final.id
+        chain.meta["status"] = chains.GLUING
+        chain.save()
+        try:
+            self.jobs.start_local(final, glue, ["--mode", "final", "--parts-dir", str(parts_dir),
+                                                "--book", str(chain.meta["book"]),
+                                                "--out", str(self.jobs.results), "--polish", "soft",
+                                                "--expect", str(chain.meta.get("total") or 0)])
+        except Exception as exc:
+            reason = f"сборку книги запустить не вышло: {exc}"
+            chain.hold(reason)
+            final.meta.update({"status": "failed", "note": reason})
+            final.save()
+            job.meta.update({"status": "waiting", "note": reason})
+            job.save()
+            job.log_line(reason)
+            self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}")
+            return
+        note = (f"все {chain.meta.get('total')} части готовы. Собираю книгу здесь: склейка, громкость "
+                f"по всей книге, музыка, m4b и read-along — без облака и без GPU, это минуты. "
+                f"Следить: «журнал» у строки сборки книги.")
+        job.meta.update({"status": "gluing", "note": note})
+        job.save()
+        job.log_line(note)
+        self.send_to_job_chat(job, f"🧩 «{job.meta['name']}»: {note}")
+
+    def glue_chain(self, chain_id: str) -> str:
+        """Кнопка «собрать книгу»: финал по готовым частям (в том числе после перезапуска контейнера)."""
+        chain = self.chains.by_id(chain_id)
+        if chain is None:
+            return "Такой книги с частями уже нет."
+        if chain.status == chains.DONE:
+            return f"«{chain.meta.get('name')}» уже собрана — пересобирать нечего."
+        if chain.status == chains.SPLIT:
+            return "Сейчас идёт нарезка книги — сборку начнём, когда части будут готовы."
+        missing = [str(part["index"]) for part in chain.parts if part.get("status") != chains.PART_DONE]
+        if missing:
+            return (f"Собирать нечего: части {', '.join(missing)} ещё не готовы. "
+                    f"Нажмите «продолжить генерацию».")
+        job = self.jobs.by_id(chain.meta.get("job") or "")
+        if job is None:
+            job = self.jobs.add(f"{chain.meta.get('name')} — сборка книги",
+                                chain.meta.get("chat_id") or self.owner_chat(),
+                                pathlib.Path(chain.meta["book"]))
+            job.meta.update({"chain": chain.id})
+            job.save()
+            chain.meta["job"] = job.id
+        self.start_glue(chain, job)
+        return f"Собираю «{chain.meta.get('name')}» из готовых частей — журнал у строки сборки."
 
     def continue_chain(self, chain_id: str) -> str:
         """Кнопка «продолжить генерацию»: с первой неготовой части, готовые не трогаем."""
@@ -993,15 +1088,22 @@ class App:
                 job.meta["chat_id"] = owner
                 job.save()
         try:
-            # Часть книги идёт на машину как обычная книга (и уже с --no-shrink: её резать не надо).
-            # А вот книга целиком в режиме частей машину не занимает: сначала нарезка и очередь.
+            # Часть книги идёт на машину ТОЛЬКО на синтез: сырьё вернётся в том, а громкость, музыка
+            # и сборка будут здесь. Книга целиком в режиме частей машину не занимает вовсе.
+            if job.meta.get("part_index") and job.meta.get("chain"):
+                chain = self.chains.by_id(job.meta["chain"])
+                if chain is None:
+                    raise RuntimeError("книга с частями больше не найдена — начните её заново")
+                job.log_line(self.parts_line(chain, job.meta["part_index"]))
+                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
+                                extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
+                                       "--parts-dir", str(self.parts_dir(chain))])
+                return
             if self.settings.mode == bot_settings.MODE_PARTS and not job.meta.get("part_index"):
                 self.start_chain(job, book)
                 return
             job.log_line(self.settings.job_line())
-            extra = ["--no-shrink"] if job.meta.get("part_index") else None
-            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
-                            extra=extra)
+            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
             job.save()
@@ -1084,7 +1186,7 @@ def main() -> int:
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
                           stop=app.stop_for_web, login=app.colab, notify=app.notify_owner,
                           settings=app.settings, chains=app.chains,
-                          continue_chain=app.continue_chain)
+                          continue_chain=app.continue_chain, glue=app.glue_chain)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "

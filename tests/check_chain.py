@@ -111,13 +111,31 @@ check("части поставлены в очередь отдельными з
 check("части помечены как часть книги, а не как новая книга",
       all("часть" in (job.get("name") or "").lower() for job in parts_listed))
 
-# ── 3. все части доходят до конца ───────────────────────────────────────────
-done_card = wait_for(lambda text: "все части готовы" in text, 240, "готовые части")
-check("бот дождался всех частей и написал об этом", "все части готовы" in done_card,
-      page()[-300:])
+# ── 3. все части доходят до конца, и книга собирается в контейнере ──────────
+done_card = wait_for(lambda text: "книга собрана" in text or "сборка книги не удалась" in text,
+                     300, "сборка книги")
+check("бот сам запустил сборку книги, когда все части готовы",
+      "Собираю книгу здесь" in done_card or "книга собрана" in done_card, page()[-400:])
+check("книга собрана и записана в результаты", "книга собрана" in done_card, page()[-400:])
 finished = [job for job in jobs() if "часть" in (job.get("name") or "").lower()]
 check("у каждой части свой архив", bool(finished) and all(job.get("result") for job in finished),
       str([(job["name"], bool(job.get("result"))) for job in finished]))
+gluers = [job for job in jobs() if "сборка книги" in (job.get("name") or "").lower()]
+check("сборка книги — отдельное задание, и оно в контейнере, а не в облаке",
+      bool(gluers) and all(job.get("local") for job in gluers)
+      and all(job["status"] == "done" for job in gluers),
+      str([(job["name"], job["status"], bool(job.get("local"))) for job in gluers]))
+glue_log = ""
+for job in gluers:
+    log = pathlib.Path(STATE, "data", "jobs") / job["id"] / "log.txt"
+    glue_log += log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+check("сборке отдали каталог с частями в томе и их количество",
+      f"частей найдено {len(finished)}, ждём {len(finished)}" in glue_log
+      and str(pathlib.Path(STATE, "data", "parts")) in glue_log,
+      glue_log[-400:])
+check("архив собранной книги лежит в результатах",
+      any("Книга для теста" in path.name for path in pathlib.Path(STATE, "data", "results").glob("*.zip")),
+      str([path.name for path in pathlib.Path(STATE, "data", "results").glob("*.zip")]))
 check("в карточке части показаны как готовые",
       "готово" in done_card.split("Готовые архивы")[0]
       and "в очереди" not in done_card.split("Готовые архивы")[0])
@@ -126,8 +144,8 @@ check("части идут по одной: одновременно не бол
 
 sent = STATE / "tgstate" / "sent.jsonl"
 sent_text = sent.read_text(encoding="utf-8") if sent.exists() else ""
-check("о нарезке и о готовых частях написано в Telegram",
-      "режу на части" in sent_text and "все части готовы" in sent_text)
+check("о нарезке, частях и сборке написано в Telegram",
+      "режу на части" in sent_text and ("Собираю книгу здесь" in sent_text or "книга собрана" in sent_text))
 
 # ── 4. возвращаем режим, чтобы не мешать остальным проверкам ────────────────
 post("/settings", {"mode": "book", "parts_hours": "1.5", "drive": "on"})
