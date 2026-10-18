@@ -32,6 +32,12 @@ import settings as bot_settings
 PER_PAGE = 20
 MAX_UPLOAD = 200 * 1024 * 1024        # потолок книги со страницы: том не должен умереть от одного файла
 
+# Части книги на странице: тот же набор значков, что в боте, чтобы не искать смысл в словах.
+CHAIN_ICONS = {"queued": "⏳", "running": "▶️", "done": "✅", "failed": "⚠️",
+               "held": "⏸", "stopped": "⏹"}
+CHAIN_STATUS = {"queued": "в очереди", "running": "идёт", "done": "готово", "failed": "сбой",
+                "held": "ждёт вашего решения", "stopped": "остановлено"}
+
 STYLE = """
  body { font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
         background: #14161a; color: #e8e8e8; }
@@ -97,6 +103,11 @@ def progress_line(state: dict) -> str:
         text += f" · {state['measured_rate']} сегм/мин"
     if state.get("remaining_minutes"):
         text += f" · осталось ≈{state['remaining']}, около {state['eta']}"
+    if state.get("part") and state["part"].get("total", 1) > 1:
+        part = state["part"]
+        where = (f"часть {part['index']} из {part['total']}" if part.get("index")
+                 else f"готово частей: {part.get('done', 0)} из {part['total']}")
+        text += f" · книга: {where}"
     return text
 
 
@@ -140,7 +151,7 @@ class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
-                 notify=None, settings=None):
+                 notify=None, settings=None, chains=None, continue_chain=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -152,6 +163,9 @@ class WebApp:
         # Настройки (режим обработки, порог нарезки, копирование на Drive) лежат в томе и меняются
         # на этой же странице. Объект общий с ботом, поэтому страница и бот видят одни значения.
         self.settings = settings
+        # Цепочки частей: страница показывает части книги и кнопку «продолжить генерацию».
+        self.chains = chains
+        self.continue_chain = continue_chain or (lambda chain_id: "Продолжение недоступно.")
         self.last_message = ""
 
     # ────────────────────────────── запросы ──────────────────────────────
@@ -263,6 +277,11 @@ class WebApp:
             return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
+        if method == "POST" and parsed.path.startswith("/chain/continue/"):
+            chain = path_las(parsed.path)
+            message = self.continue_chain(chain)
+            self.notify("Продолжение частей со страницы. " + message)
+            return self.redirect("/", message)
         if method == "POST" and where == "/settings":
             if self.settings is None:
                 return self.redirect("/", "Настройки недоступны в этой сборке.")
@@ -342,9 +361,54 @@ class WebApp:
                  + "\n".join(rows) + "</table>"
                  + pager(page, len(jobs), "/") + "</div>")
 
-        return upload + self.settings_card() + self.colab_card() + table \
+        return upload + self.chains_card() + self.settings_card() + self.colab_card() + table \
             + self.files_card("/files", "Книги в папке", "books") \
             + self.files_card("/results", "Готовые архивы", "results")
+
+    def chains_card(self) -> str:
+        """Книги, разрезанные на части: что готово, что идёт, что упало — и кнопка «продолжить»."""
+        if self.chains is None:
+            return ""
+        cards = []
+        for chain in self.chains.load()[:5]:
+            rows = []
+            for part in chain.parts:
+                job = self.jobs.by_id(part.get("job_id") or "")
+                status = part.get("status") or "queued"
+                actions = []
+                if job is not None:
+                    actions.append(f'<a href="/log/{job.meta["session"]}">журнал</a>')
+                    if part.get("result"):
+                        actions.append('<a href="/result/'
+                                       + urllib.parse.quote(pathlib.Path(part["result"]).name)
+                                       + '">скачать</a>')
+                    if status == "failed":
+                        actions.append('<form class="inline" method="post" action="/repeat/'
+                                       + job.meta["session"] + '"><button class="ghost" type="submit" '
+                                       'title="Повторить именно эту часть">повторить часть</button></form>')
+                rows.append(f'<tr><td>{CHAIN_ICONS.get(status, "•")} '
+                            f'{html.escape(chain.title_of(part))}</td>'
+                            f'<td>{CHAIN_STATUS.get(status, status)}</td>'
+                            f'<td>{"".join(actions)}</td></tr>')
+            if not rows:
+                rows.append('<tr><td class="muted">нарезка идёт…</td><td></td><td></td></tr>')
+            note = ""
+            if chain.meta.get("note"):
+                note = f'<div class="note" style="margin-top:8px">{html.escape(chain.meta["note"])}</div>'
+            resume = ""
+            if chain.status != "done":
+                resume = ('<form class="inline" method="post" action="/chain/continue/'
+                          + chain.id + '"><button type="submit" title="Продолжить с первой неготовой '
+                          'части: готовые не трогаем">продолжить генерацию</button></form>')
+            cards.append(f'<div class="card"><h2>Книга по частям: '
+                         f'{html.escape(str(chain.meta.get("name") or ""))}</h2>'
+                         f'<div class="muted">{html.escape(chain.summary())} · порог '
+                         f'{float(chain.meta.get("parts_hours") or 0):g} ч · частей в томе: '
+                         f'{len(chain.parts)}</div>'
+                         f'<table style="margin-top:8px">'
+                         f'<tr><th>Часть</th><th>Состояние</th><th>Действия</th></tr>'
+                         f'{"".join(rows)}</table>{resume}{note}</div>')
+        return "".join(cards)
 
     def mode_hint(self) -> str:
         """Что будет с книгой при загрузке — словами, а не догадками по журналу."""
@@ -386,12 +450,18 @@ class WebApp:
 
     def job_row(self, job) -> str:
         meta = job.meta
-        icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹"}
+        icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
+                 "splitting": "✂️", "waiting": "🧩"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
+        chain = self.chains.by_id(meta.get("chain") or "") if self.chains is not None else None
         tail = ""
-        if job.status == "running":
+        if job.status in ("splitting", "waiting") and chain is not None:
+            # Книга с частями: строки журнала тут ни о чём — важно, где цепочка.
+            tail = (f'<div class="muted">{html.escape(chain.summary())} · порог '
+                    f'{float(chain.meta.get("parts_hours") or 0):g} ч</div>')
+        elif job.status == "running":
             lines = [line.strip() for line in job.tail(400).splitlines() if line.strip()]
             progress = job.progress()
             # Прогресс по сегментам важнее последней строки журнала: во время синтеза журнал
@@ -420,6 +490,15 @@ class WebApp:
                            f'времени до конца">сколько осталось</a>')
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
+        elif job.status in ("splitting", "waiting") and chain is not None:
+            # Книга с частями: «повторить» у неё бессмысленно (машину она не занимает), зато нужна
+            # кнопка «продолжить» — ею цепочка поднимается после сбоя или перезапуска бота.
+            actions.append('<form class="inline" method="post" action="/chain/continue/'
+                           + chain.id + '"><button class="ghost" type="submit" title="Продолжить '
+                           'с первой неготовой части">продолжить генерацию</button></form>')
+            actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
+                           f'<button class="ghost" type="submit" title="Остановить книгу вместе с '
+                           f'частями">остановить</button></form>')
         else:
             actions.append(f'<form class="inline" method="post" action="/repeat/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit" title="Запустить сборку этой книги заново">'

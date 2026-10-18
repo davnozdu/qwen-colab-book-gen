@@ -197,6 +197,24 @@ class Job:
             for step in STAGE_NAMES[index:]:                   # стадии после текущей
                 remaining += STAGE_MINUTES.get(step, 3)
 
+        # Части книги: у части есть номер и общее число, а у книги целиком — сколько частей уже
+        # готово. Без этой метки по строке прогресса не понять, первая это часть или вторая.
+        total_parts = int(self.meta.get("parts_total") or 0)
+        part = None
+        if total_parts:
+            index_part = int(self.meta.get("part_index") or 0)
+            finished_parts = int(self.meta.get("parts_done") or 0)
+            if index_part:
+                part = {"index": index_part, "total": total_parts, "done": finished_parts}
+                # Проценты книги целиком: готовые части плюс доля текущей.
+                whole = (finished_parts + round(percent) / 100) / total_parts * 100
+                percent = min(round(whole), 99)
+            else:
+                part = {"index": 0, "total": total_parts, "done": finished_parts}
+                percent = round(100 * finished_parts / total_parts)
+            if self.status == "done":
+                percent = 100
+
         def human(minutes: float) -> str:
             return (f"{int(minutes)} мин" if minutes < 60
                     else f"{int(minutes // 60)} ч {int(minutes % 60)} мин")
@@ -206,7 +224,7 @@ class Job:
                 "expected_hours": expected_hours, "measured_rate": round(rate, 1) if rate else None,
                 "remaining_minutes": round(remaining), "remaining": human(remaining),
                 "eta": time.strftime("%H:%M", time.localtime(time.time() + remaining * 60)) if remaining else "",
-                "running": self.status == "running"}
+                "part": part, "running": self.status == "running"}
 
     def log_payload(self, offset: int = 0) -> dict:
         """Кусок журнала для живой страницы: новые байты с позиции offset плюс состояние."""
@@ -318,9 +336,23 @@ class Jobs:
         return len(self.live_running()) < self.max_jobs
 
     def fail_stale_queued(self) -> int:
-        """На старте бота: задания, которые не успели запуститься, помечаем неудачными."""
+        """На старте бота: не успевшие запуститься задания помечаем неудачными.
+
+        Исключения — цепочки частей: задание, которое ждёт свои части, не «застряло» (части лежат
+        в томе, и продолжение возможно), а нарезка, прерванная перезапуском, честно помечается
+        неудачной: её поток умер вместе с ботом.
+        """
         fixed = 0
         for job in self.load():
+            if job.status == "waiting" and job.meta.get("chain"):
+                continue                      # части в томе: продолжение возможно, кнопка на странице
+            if job.status == "splitting":
+                job.meta.update({"status": "failed", "finished": time.time(),
+                                 "note": "Нарезка на части прервалась (бот перезапускали). "
+                                         "Нажмите «продолжить генерацию» — части пересоберутся здесь же."})
+                job.save()
+                fixed += 1
+                continue
             if job.status == "queued" and not self.alive(job):
                 job.meta.update({"status": "failed", "finished": time.time(),
                                  "note": "Задание не запустилось (бот перезапускали). "

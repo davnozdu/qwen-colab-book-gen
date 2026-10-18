@@ -204,6 +204,9 @@ if ! TG_STATE="$STATE" BUTTONS_FROM="$BEFORE_BUTTONS" python3 "$HERE/check_butto
 echo "--- проверяю веб-страницу ---"
 if ! WEB_BASE="http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" WORK="$WORK" python3 "$HERE/check_web.py"; then fail=1; fi
 
+echo "--- проверяю режим частей (нарезка ботом, очередь частей, кнопка «продолжить») ---"
+if ! python3 "$HERE/check_chain.py" "http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" "$WORK"; then fail=1; fi
+
 # Ничего не должно остаться работать: ни фонового окна, ни процесса сборки.
 # Даём пару секунд на завершение и не считаем зомби (они уже не работают).
 if [ "${RUN_LOCAL:-0}" != "1" ]; then

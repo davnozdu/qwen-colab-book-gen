@@ -11,6 +11,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "bot"))
 
 import bot as botmod          # noqa: E402
+import chains as chains_mod   # noqa: E402
 import jobs as jobs_mod       # noqa: E402
 import settings as settings_mod  # noqa: E402
 import web as webmod          # noqa: E402
@@ -274,6 +275,74 @@ whole_options.update({"mode": "book", "parts_hours": "1.5", "drive": "on"})
 check("режим «целиком» пишет, что нарезка не действует",
       "без нарезки" in whole_options.job_line() and "не действует" in whole_options.job_line(),
       whole_options.job_line())
+
+# ── части книги: план нарезки, состояние цепочки, кнопка «продолжить» ─────
+plan_two = {"parts": 2, "estimated_hours": 3.0,
+            "files": [{"part": "Книга — часть 1 из 2", "epub": "/tmp/p1.epub", "estimated_hours": 1.5},
+                      {"part": "Книга — часть 2 из 2", "epub": "/tmp/p2.epub", "estimated_hours": 1.5}]}
+parts_two = chains_mod.parts_from_plan(plan_two, pathlib.Path("/tmp/book.epub"))
+check("план нарезки превращается в части с номерами",
+      [part["index"] for part in parts_two] == [1, 2]
+      and parts_two[1]["title"].endswith("часть 2 из 2")
+      and parts_two[0]["hours"] == 1.5, str(parts_two))
+parts_one = chains_mod.parts_from_plan({"parts": 1, "estimated_hours": 0.8, "files": []},
+                                       pathlib.Path("/tmp/short.epub"))
+check("короткая книга остаётся одной частью",
+      len(parts_one) == 1 and parts_one[0]["total"] == 1 and parts_one[0]["epub"].endswith("short.epub"),
+      str(parts_one))
+
+chain_store = chains_mod.Chains(work / "data")
+chain = chain_store.create("/tmp/book.epub", "Книга", "42", 1.5)
+chain.set_parts(parts_two)
+# Бот пользуется этими полями цепочки: пропажа любого — это ошибка в потоке нарезки,
+# которую в чате видно только как «Не вышло — ...».
+check("у цепочки есть всё, чем пользуется бот",
+      all(hasattr(chain, name) for name in ("parts", "parts_hours", "out", "log", "status",
+                                            "id", "title_of", "summary", "hold", "release",
+                                            "finish", "all_done", "failed", "held",
+                                            "first_unfinished", "set_parts")))
+check("части сохраняются в томе", len(chain_store.by_id(chain.id).parts) == 2
+      and chain.status == chains_mod.RUNNING, chain.summary())
+# Цепочку двигает chains_pass, а находит он её по метке «job»: без неё части соберутся,
+# а книгу никто не закроет.
+linked = chains_mod.pick_for(chain_store, "/tmp/book.epub", "job-1", "Книга", "42", 1.5)
+check("цепочка всегда привязана к заданию-родителю",
+      linked.meta.get("job") == "job-1" and linked.id == chain.id
+      and chain_store.by_id(chain.id).meta.get("job") == "job-1")
+new_chain = chains_mod.pick_for(chain_store, "/tmp/other.epub", "job-2", "Другая", "42", 1.5)
+check("для другой книги заводится своя цепочка",
+      new_chain.id != chain.id and new_chain.meta.get("job") == "job-2")
+check("повторная загрузка той же книги находит прежнюю нарезку",
+      len(chain_store.of_book("/tmp/book.epub")) == 1)
+chain.parts[0]["status"] = chains_mod.PART_DONE
+chain.parts[1]["status"] = chains_mod.PART_RUNNING
+check("строка цепочки говорит, где идёт книга",
+      "часть 2 из 2" in chain.summary(), chain.summary())
+chain.parts[1]["status"] = chains_mod.PART_FAILED
+chain.hold("часть 2 упала дважды")
+check("упавшая дважды часть останавливает цепочку, а не гонит дальше",
+      chain.status == chains_mod.FAILED and chain.held() == [] and len(chain.failed()) == 1
+      and "упала дважды" in chain.meta["note"], chain.summary())
+check("«продолжить генерацию» возвращает в работу упавшие и придержанные части",
+      [part["index"] for part in chain.release()] == [2] and chain.status == chains_mod.RUNNING
+      and chain.failed() == [])
+chain.parts[1]["status"] = chains_mod.PART_HELD
+chain.parts[1]["retries"] = 1
+check("придержанная часть тоже поднимается кнопкой",
+      [part["index"] for part in chain.release()] == [2])
+chain.parts[1]["status"] = chains_mod.PART_DONE
+check("когда готовы все части, цепочка закрывается", chain.all_done())
+chain.finish()
+check("готовая цепочка не висит в активных", chain.status == chains_mod.DONE
+      and chain not in chain_store.active(), chain.summary())
+
+# Проценты книги целиком: готовые части плюс доля текущей.
+part_job = jobs_mod.Job(prog)
+part_job.meta.update({"parts_total": 2, "parts_done": 1, "part_index": 2, "status": "running"})
+part_job.save()
+label = jobs_mod.Job(prog).progress()
+check("проценты считаются по книге целиком, а не по одной части",
+      label["part"] == {"index": 2, "total": 2, "done": 1}, str(label.get("part")))
 
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"

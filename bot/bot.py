@@ -22,9 +22,11 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
+import chains
 import colab_auth
 import settings as bot_settings
 from jobs import Jobs, safe_stem
@@ -310,6 +312,8 @@ class App:
         # Настройки обработки (режим, порог нарезки, Drive) — в томе: переживают обновление
         # образа. Меняются на странице, здесь объект общий со страницей.
         self.settings = bot_settings.Settings(DATA / "settings.json")
+        # Цепочки частей: книга, разрезанная на части, и состояние этих частей (тоже в томе).
+        self.chains = chains.Chains(DATA)
         self.menu_chats = set()          # чаты, где постоянное меню уже поставлено (на этот запуск)
 
     # ────────────────────────────── состояние ──────────────────────────────
@@ -362,9 +366,174 @@ class App:
         """Завершившиеся задания: итог в чат; затем запускаем то, что стоит в очереди."""
         for job in self.jobs.refresh().values():
             self.report(job)
+        self.chains_pass()
         for job in reversed(self.jobs.load()):
             if job.status == "queued" and self.jobs.free_slot():
                 self.launch(job)
+
+    # ────────────────────────────── части книги ──────────────────────────────
+    def start_chain(self, job, book: pathlib.Path) -> None:
+        """Режим частей: книга режется ЗДЕСЬ (не на машине) и собирается частями.
+
+        Нарезка — это минуты CPU в контейнере, поэтому машину на неё не тратим, а части кладём
+        прямо в том: они переживут и перезапуск бота, и обновление образа.
+        """
+        chain = chains.pick_for(self.chains, book, job.id,
+                                job.meta.get("name") or book.stem,
+                                job.meta.get("chat_id") or self.owner_chat(),
+                                self.settings.parts_hours)
+        job.meta.update({"status": "splitting", "chain": chain.id,
+                         "parts_total": 0, "parts_done": 0, "part_index": 0})
+        job.save()
+        job.log_line(f"режим частей: режу книгу на части по {self.settings.parts_hours:g} ч "
+                     f"(в контейнере, машину на это не тратим)")
+        self.send_to_job_chat(job, f"✂️ «{job.meta['name']}»: режу на части по "
+                                   f"{self.settings.parts_hours:g} ч. Это минуты — потом части пойдут "
+                                   f"в облако по очереди, а склейка будет здесь.")
+        self.in_background(self.owner_chat(), lambda: self.split_chain(chain, job), "Нарезка на части")
+
+    def split_chain(self, chain, job) -> None:
+        """Нарезка и постановка частей в очередь. Идёт в отдельном потоке: минуты CPU."""
+        code, plan = chains.shrink_step(sys.executable, PIPELINE, pathlib.Path(chain.meta["book"]),
+                                        chain.out, chain.parts_hours, chain.log, env=self.jobs.env)
+        if code != 0 or not plan:
+            chain.meta["status"] = chains.FAILED
+            chain.meta["note"] = "нарезка не удалась — смотрите журнал нарезки"
+            chain.save()
+            job.meta.update({"status": "failed", "finished": time.time(),
+                             "note": "нарезка на части не удалась: смотрите журнал"})
+            job.save()
+            self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: нарезка на части не удалась. "
+                                       f"Журнал — на странице, кнопка «журнал».")
+            return
+        parts = chains.parts_from_plan(plan, pathlib.Path(chain.meta["book"]))
+        chain.set_parts(parts)
+        chain.log_line(f"частей: {len(parts)} — "
+                       + ", ".join(f"{part['index']}:{part['hours']:.2f} ч" for part in parts))
+        job.meta.update({"parts_total": len(parts), "parts_done": 0, "part_index": 0})
+        job.save()
+        for part in chain.parts:
+            job_id = self.jobs.add(chain.title_of(part), job.meta.get("chat_id") or "",
+                                   pathlib.Path(part["epub"]))
+            job_id.meta.update({"chain": chain.id, "part_index": part["index"],
+                                "parts_total": len(chain.parts), "parts_done": 0})
+            job_id.log_line(f"часть {part['index']} из {len(chain.parts)} книги "
+                            f"«{chain.meta.get('name')}» (≈{part['hours']:.2f} ч звука)")
+            job_id.save()
+            part["job_id"] = job_id.id
+        chain.save()
+        job.log_line(f"частей: {len(chain.parts)} — поставил в очередь, пойдут по одной")
+        self.send_to_job_chat(job, f"✂️ «{job.meta['name']}» разрезана на {len(chain.parts)} "
+                                   f"част. Первая часть уже в очереди, дальше пойдут сами.")
+
+    def chains_pass(self) -> None:
+        """Двигает цепочки частей: сверяет состояние частей, повторяет упавшую, закрывает книгу."""
+        for chain in self.chains.active():
+            job = self.jobs.by_id(chain.meta.get("job") or "")
+            if job is None:
+                continue
+            if chain.status == chains.SPLIT:
+                continue                                  # нарезка идёт в своём потоке
+            changed = False
+            for part in chain.parts:
+                part_job = self.jobs.by_id(part.get("job_id") or "")
+                if part_job is None:
+                    continue
+                if part_job.status != part.get("status"):
+                    part["status"] = part_job.status
+                    changed = True
+                if part_job.status == chains.PART_DONE and part_job.meta.get("result"):
+                    part["result"] = part_job.meta["result"]
+            if changed:
+                chain.save()
+            done = [part for part in chain.parts if part.get("status") == chains.PART_DONE]
+            job.meta["parts_done"] = len(done)
+            current = next((part for part in chain.parts if part.get("status") == chains.PART_RUNNING),
+                            None)
+            job.meta["part_index"] = current["index"] if current else 0
+            job.save()
+
+            # Упавшую часть повторяем САМИ один раз: чаще всего это «заняты машины» или обрыв
+            # сессии. Второй раз не упорствуем — зовём человека, иначе цепочка молотит впустую.
+            for part in chain.failed():
+                if int(part.get("retries") or 0) < chains.RETRIES:
+                    part["retries"] = int(part.get("retries") or 0) + 1
+                    part["status"] = chains.PART_QUEUED
+                    part_job = self.jobs.by_id(part.get("job_id") or "")
+                    if part_job is not None:
+                        part_job.meta.update({"status": "queued", "note": "",
+                                              "finished": None, "result": ""})
+                        part_job.log_line("повтор после сбоя")
+                        part_job.save()
+                    chain.save()
+                    job.log_line(f"часть {part['index']} упала — повторяю её сам (попытка 2)")
+                    self.send_to_job_chat(job, f"↻ «{job.meta['name']}», часть {part['index']} "
+                                               f"упала — повторяю её сам.")
+                    return
+                if chain.status != chains.FAILED:
+                    reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды. "
+                              f"Дальше идти нельзя: книга получится с дырой. "
+                              f"На странице — «продолжить генерацию».")
+                    chain.hold(reason)
+                    job.meta.update({"status": "waiting", "note": reason})
+                    job.save()
+                    job.log_line(f"остановлено: {reason}")
+                    self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}")
+                    return
+
+            if chain.all_done() and chain.status != chains.DONE:
+                chain.finish()
+                ready = len([part for part in chain.parts if part.get("result")])
+                note = (f"все части готовы ({ready} из {chain.meta.get('total')}). "
+                        f"Склейка в одну книгу — следующий шаг, части пока лежат архивами.")
+                job.meta.update({"status": "waiting", "note": note})
+                job.save()
+                job.log_line(note)
+                self.send_to_job_chat(job, f"✅ «{job.meta['name']}»: {note}")
+
+    def continue_chain(self, chain_id: str) -> str:
+        """Кнопка «продолжить генерацию»: с первой неготовой части, готовые не трогаем."""
+        chain = self.chains.by_id(chain_id)
+        if chain is None:
+            return "Такой книги с частями уже нет."
+        job = self.jobs.by_id(chain.meta.get("job") or "")
+        if chain.status == chains.DONE and chain.all_done():
+            return f"«{chain.meta.get('name')}»: все части уже готовы, продолжать нечего."
+        if chain.status == chains.SPLIT or not chain.parts:
+            # Нарезка не доделалась (например, бота перезапускали) — начинаем её заново.
+            if job is None:
+                return "Задание этой книги потерялось — загрузите книгу заново."
+            job.meta.update({"status": "splitting", "note": "", "finished": None})
+            job.save()
+            job.log_line("продолжаю: перезапускаю нарезку на части")
+            self.in_background(self.owner_chat(), lambda: self.split_chain(chain, job), "Нарезка на части")
+            return f"«{chain.meta.get('name')}»: перезапускаю нарезку на части."
+        released = chain.release()
+        for part in released:
+            part_job = self.jobs.by_id(part.get("job_id") or "")
+            if part_job is not None:
+                part_job.meta.update({"status": "queued", "note": "", "finished": None})
+                part_job.log_line("продолжаю по вашей команде")
+                part_job.save()
+        if job is not None:
+            job.meta.update({"status": "waiting", "note": ""})
+            job.save()
+            job.log_line("продолжаю с первой неготовой части")
+        where = released[0]["index"] if released else (chain.first_unfinished() or {}).get("index")
+        return f"«{chain.meta.get('name')}»: продолжаю с части {where}."
+
+    def send_to_job_chat(self, job, text: str) -> None:
+        """Сообщение по книге: в чат задания, а если его нет — владельцу."""
+        chat_id = str(job.meta.get("chat_id") or "").strip()
+        if not looks_like_chat_id(chat_id):
+            chat_id = self.owner_chat()
+        if not chat_id:
+            print(f"[bot] {text}", flush=True)
+            return
+        try:
+            self.bot.send(chat_id, text)
+        except Exception as exc:
+            print(f"[bot] сообщение о частях не ушло в {chat_id}: {exc}", flush=True)
 
     def handle(self, update: dict) -> None:
         # Нажатие кнопки: отдельная ветка — у такого обновления нет ни текста, ни документа.
@@ -543,17 +712,25 @@ class App:
             self.send_menu(chat_id, "Не знаю такой команды.\n\n" + HELP)
 
     def status(self, chat_id) -> None:
-        running = [job for job in self.jobs.load() if job.status == "running"]
-        queued = [job for job in self.jobs.load() if job.status == "queued"]
+        jobs = self.jobs.load()
+        running = [job for job in jobs if job.status == "running"]
+        queued = [job for job in jobs if job.status == "queued"]
+        # Книга в режиме частей машину не занимает: её состояние — «режется» или «жду части».
+        chains_now = [job for job in jobs if job.status in ("splitting", "waiting")]
         lines = []
         for job in running:
             minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
             last = [line.strip() for line in job.tail(400).splitlines() if line.strip()]
             lines.append(f"▶️ {job.meta['name']} — {minutes:.0f} мин\n   {last[-1][:120] if last else '…'}")
+        for job in chains_now:
+            chain = self.chains.by_id(job.meta.get("chain") or "")
+            where = chain.summary() if chain else "части"
+            note = f"\n   {job.meta['note'][:120]}" if job.meta.get("note") else ""
+            lines.append(f"✂️ {job.meta['name']} — {where}{note}")
         for job in queued:
             lines.append(f"⏳ {job.meta['name']} — в очереди")
-        head = f"Сейчас: {len(running)} в работе, {len(queued)} в очереди."
-        if not running and not queued:
+        head = (f"Сейчас: {len(running) + len(chains_now)} в работе, {len(queued)} в очереди.")
+        if not running and not queued and not chains_now:
             head = "Свободно: ничего не собирается."
         self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=MENU)
 
@@ -584,6 +761,11 @@ class App:
                 detail += f", скорость {state['measured_rate']} сегм/мин"
             if state["remaining_minutes"]:
                 detail += (f" · осталось ≈{state['remaining']}, закончится около {state['eta']}")
+            if state.get("part") and state["part"].get("total", 1) > 1:
+                part = state["part"]
+                where = (f"часть {part['index']} из {part['total']}" if part.get("index")
+                         else f"готово частей: {part.get('done', 0)} из {part['total']}")
+                detail += f" · книга: {where}"
             lines.append(detail)
             # Замер для скорости: со второго запроса оценка считается по факту, а не по модели.
             samples = [pair for pair in (job.meta.get("progress_samples") or []) if len(pair) == 2]
@@ -602,7 +784,8 @@ class App:
         if not jobs:
             self.bot.send(chat_id, "Заданий пока не было.", buttons=MENU)
             return
-        icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹"}
+        icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
+                 "splitting": "✂️", "waiting": "🧩"}
         lines = [f"{icons.get(job.status, '•')} {job.meta['name']} · {job.status}"
                  f"{' · ' + job.meta['note'][:60] if job.meta.get('note') and job.status == 'failed' else ''}"
                  f"\n   /log {job.meta['session']}" for job in jobs]
@@ -633,17 +816,43 @@ class App:
                            "Остановка")
 
     def stop_one(self, job) -> str:
-        """Гасит задание и освобождает его машину Colab."""
+        """Гасит задание и освобождает его машину Colab.
+
+        Если это книга в режиме частей, останавливаем и её части: иначе они поедут сами дальше —
+        очередь видит их как обычные задания, и «остановил» превратилось бы в «остановил только
+        то, что идёт сейчас».
+        """
+        chain = self.chains.by_id(job.meta.get("chain") or "")
+        if chain is not None and not job.meta.get("part_index"):
+            for part in chain.parts:
+                part_job = self.jobs.by_id(part.get("job_id") or "")
+                if part_job is None or part_job.status in ("done", "failed", "stopped"):
+                    continue
+                self.jobs.stop(part_job)
+                part_job.meta.update({"status": "stopped", "finished": time.time(),
+                                      "note": "остановлено вручную (вся книга)"})
+                part_job.save()
+                part["status"] = "stopped"
+            chain.hold("остановлено вручную")
+            chain.meta["status"] = "stopped"
+            chain.save()
+            job.meta.update({"status": "stopped", "finished": time.time(),
+                             "note": "остановлено вручную"})
+            job.save()
+            return "части остановлены, нарезка осталась в томе"
         self.jobs.stop(job)
         job.meta.update({"status": "stopped", "finished": time.time(), "note": "остановлено вручную"})
         job.save()
         return f"машина {job.meta['session']} освобождена"
 
     def stop_all_jobs(self) -> str:
-        """Останавливает всё: текущую сборку, очередь и машины Colab на них."""
-        jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
+        """Останавливает всё: текущую сборку, очередь, части и машины Colab на них."""
+        jobs = [job for job in self.jobs.load()
+                if job.status in ("running", "queued", "splitting", "waiting")]
         if not jobs:
             return "Останавливать нечего: сейчас ничего не собирается."
+        # Сначала книги с частями: их остановка сама гасит и части, и цепочку.
+        jobs.sort(key=lambda job: bool(job.meta.get("part_index")))
         for job in jobs:
             self.stop_one(job)
         names = ", ".join(f"«{job.meta['name']}»" for job in jobs)
@@ -784,8 +993,15 @@ class App:
                 job.meta["chat_id"] = owner
                 job.save()
         try:
+            # Часть книги идёт на машину как обычная книга (и уже с --no-shrink: её резать не надо).
+            # А вот книга целиком в режиме частей машину не занимает: сначала нарезка и очередь.
+            if self.settings.mode == bot_settings.MODE_PARTS and not job.meta.get("part_index"):
+                self.start_chain(job, book)
+                return
             job.log_line(self.settings.job_line())
-            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
+            extra = ["--no-shrink"] if job.meta.get("part_index") else None
+            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
+                            extra=extra)
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
             job.save()
@@ -867,7 +1083,8 @@ def main() -> int:
         port = int(os.environ.get("WEB_PORT", "8090"))
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
                           stop=app.stop_for_web, login=app.colab, notify=app.notify_owner,
-                          settings=app.settings)
+                          settings=app.settings, chains=app.chains,
+                          continue_chain=app.continue_chain)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "
