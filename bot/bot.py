@@ -543,7 +543,10 @@ class App:
             self.jobs.start_local(final, glue, ["--mode", "final", "--parts-dir", str(parts_dir),
                                                 "--book", str(chain.meta["book"]),
                                                 "--out", str(self.jobs.results), "--polish", "soft",
-                                                "--expect", str(chain.meta.get("total") or 0)])
+                                                "--expect", str(chain.meta.get("total") or 0),
+                                                # имя архива как у файла книги: по абсолютному пути в
+                                                # журнале бот видит, что архив готов
+                                                "--name", pathlib.Path(chain.meta["book"]).stem])
         except Exception as exc:
             reason = f"сборку книги запустить не вышло: {exc}"
             chain.hold(reason)

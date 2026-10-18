@@ -133,9 +133,9 @@ check("сборке отдали каталог с частями в томе и
       f"частей найдено {len(finished)}, ждём {len(finished)}" in glue_log
       and str(pathlib.Path(STATE, "data", "parts")) in glue_log,
       glue_log[-400:])
-check("архив собранной книги лежит в результатах",
-      any("Книга для теста" in path.name for path in pathlib.Path(STATE, "data", "results").glob("*.zip")),
-      str([path.name for path in pathlib.Path(STATE, "data", "results").glob("*.zip")]))
+check("архив собранной книги лежит в результатах и бот на него ссылается",
+      bool(gluers) and all(job.get("result") and pathlib.Path(job["result"]).is_file() for job in gluers),
+      str([(job.get("result"), job.get("note")) for job in gluers]))
 check("в карточке части показаны как готовые",
       "готово" in done_card.split("Готовые архивы")[0]
       and "в очереди" not in done_card.split("Готовые архивы")[0])

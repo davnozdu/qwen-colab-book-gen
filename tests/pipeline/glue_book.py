@@ -16,6 +16,7 @@ parser.add_argument("--book", default="")
 parser.add_argument("--polish", default="soft")
 parser.add_argument("--work", default="")
 parser.add_argument("--expect", default="0")
+parser.add_argument("--name", default="")
 args, _extra = parser.parse_known_args()
 
 parts = sorted(pathlib.Path(args.parts_dir).glob("part-*"))
@@ -32,7 +33,7 @@ if args.mode == "part":
         print(f"части {index} нет в {args.parts_dir}", flush=True)
         raise SystemExit(1)
     title = f"Книга для теста — часть {index} из {len(parts)}"
-    archive = out / f"{title}.zip"
+    archive = out / f"{args.name or ('часть-' + str(index))}.zip"
     with zipfile.ZipFile(archive, "w") as zf:
         zf.writestr(f"{title}.m4b", b"part audio")
         zf.writestr(f"{title}-read-along.epub", b"part epub")
@@ -44,7 +45,7 @@ if int(args.expect or 0) and len(parts) != int(args.expect):
     print(f"частей {len(parts)}, а ждали {args.expect} — сборку не начинаю", flush=True)
     raise SystemExit(1)
 title = "Книга для теста"
-archive = out / f"{title}.zip"
+archive = out / f"{args.name or 'книга'}.zip"
 with zipfile.ZipFile(archive, "w") as zf:
     zf.writestr(f"{title}.m4b", b"whole book audio")
     zf.writestr(f"{title}-read-along.epub", b"whole book epub")
