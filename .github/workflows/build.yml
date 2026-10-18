@@ -3,7 +3,7 @@ name: build image
 # Сборка и публикация образа в GitHub Container Registry. Никаких сборок на машине.
 on:
   push:
-    branches: [main]
+    branches: [main, parts-mode]
     paths-ignore: ["README.md", "LICENSE"]
   workflow_dispatch:
   # Ручной/автоматический пересбор из davnozdu/qwen-epub-audiobook
@@ -13,6 +13,12 @@ on:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
+  # Конвейер берём клоном, чтобы не держать две копии. В тестовой ветке — из такой же тестовой
+  # ветки конвейера: правки проверяем до того, как они попадут в main.
+  PIPELINE_REF: ${{ github.ref_name == 'main' && 'main' || 'parts-mode' }}
+  # main публикует :latest — именно его тянет рабочий контейнер. Тестовая ветка публикует только
+  # :test, поэтому рабочий образ от её сборок не меняется.
+  IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'test' }}
 
 jobs:
   build:
@@ -26,9 +32,9 @@ jobs:
       # Конвейер берём из основного репозитория, чтобы не держать две копии.
       - name: Забрать конвейер сборки книги
         run: |
-          git clone --depth 1 https://github.com/davnozdu/qwen-epub-audiobook.git vendor/qwen-epub-audiobook
+          git clone --depth 1 --branch "$PIPELINE_REF" https://github.com/davnozdu/qwen-epub-audiobook.git vendor/qwen-epub-audiobook
           test -f vendor/qwen-epub-audiobook/colab/cli/run-book.py
-          echo "коммит конвейера: $(git -C vendor/qwen-epub-audiobook rev-parse --short HEAD)"
+          echo "ветка конвейера: $PIPELINE_REF, коммит: $(git -C vendor/qwen-epub-audiobook rev-parse --short HEAD)"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -45,7 +51,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
             ${{ env.IMAGE }}:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -67,6 +73,11 @@ jobs:
             run-book --help | grep -q -- "--stop-on-failure"
             python3 --version
             python3 -m py_compile /opt/bot/bot.py /opt/bot/jobs.py /opt/bot/tgapi.py /opt/bot/colab_auth.py
+            # Финал в контейнере (режим частей): нужны ffmpeg и библиотеки нарезки/сборки/звука.
+            ffmpeg -version >/dev/null
+            ffprobe -version >/dev/null
+            python3 -c "import ebooklib, lxml, soundfile, numpy, razdel"
+            test -f /opt/qwen-epub-audiobook/shrink_book.py
             test -f /opt/qwen-epub-audiobook/colab/cli/run-book.py
             test -f /opt/qwen-epub-audiobook/colab/colab_run_all.py
             echo "образ в порядке"

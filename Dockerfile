@@ -19,12 +19,19 @@ ENV PYTHONUNBUFFERED=1 \
     WEB_ENABLED=1
 
 # tmux — фоновые задания; attr — xattr для ссылок на Google Drive; tini — аккуратное завершение.
+# ffmpeg/ffprobe и libsndfile — режим частей: громкость, музыка и сборка книги идут в контейнере,
+# на сырье из облака (там же читаются и пишутся wav/flac).
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git tmux attr procps tini \
+      ca-certificates curl git tmux attr procps tini ffmpeg libsndfile1 \
  && rm -rf /var/lib/apt/lists/*
 
 RUN pip install "google-colab-cli"
+
+# Библиотеки конвейера для работы В КОНТЕЙНЕРЕ (режим частей): нарезка книги и сборка epub
+# (ebooklib + lxml), громкость (soundfile + numpy), разбор предложений при сборке книги (razdel).
+# В скриптах конвейера они подключаются лениво, поэтому режим «одна книга целиком» работает и без них.
+RUN pip install "ebooklib" "lxml" "soundfile" "numpy" "razdel"
 
 # Конвейер сборки аудиокниги (копию кладёт workflow из davnozdu/qwen-epub-audiobook).
 COPY vendor/qwen-epub-audiobook/ /opt/qwen-epub-audiobook/
@@ -45,8 +52,10 @@ RUN mkdir -p /home/bot/.config/colab-cli /data \
  && colab version \
  && python3 --version \
  && tmux -V \
+ && ffmpeg -version >/dev/null \
+ && python3 -c "import ebooklib, lxml, soundfile, numpy, razdel" \
  && /usr/local/bin/run-book --help >/dev/null \
- && echo "образ собран: CLI, tmux, конвейер и Linux-запуск на месте"
+ && echo "образ собран: CLI, tmux, ffmpeg, конвейер и Linux-запуск на месте"
 
 VOLUME ["/home/bot", "/data"]
 EXPOSE 8090
