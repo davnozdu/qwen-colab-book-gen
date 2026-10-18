@@ -121,18 +121,21 @@ finished = [job for job in jobs() if "часть" in (job.get("name") or "").low
 check("у каждой части свой архив", bool(finished) and all(job.get("result") for job in finished),
       str([(job["name"], bool(job.get("result"))) for job in finished]))
 gluers = [job for job in jobs() if "сборка книги" in (job.get("name") or "").lower()]
-check("сборка книги — отдельное задание, и оно в контейнере, а не в облаке",
-      bool(gluers) and all(job.get("local") for job in gluers)
-      and all(job["status"] == "done" for job in gluers),
-      str([(job["name"], job["status"], bool(job.get("local"))) for job in gluers]))
 glue_log = ""
 for job in gluers:
     log = pathlib.Path(STATE, "data", "jobs") / job["id"] / "log.txt"
     glue_log += log.read_text(encoding="utf-8", errors="replace") if log.is_file() else ""
+# Сборка идёт в контейнере: в журнале нет ни подъёма машины, ни сессий Colab — только склейка.
+check("сборка книги — отдельное задание и идёт в контейнере, а не в облаке",
+      bool(gluers) and all(job["status"] == "done" for job in gluers)
+      and "сборка книги: режим final" in glue_log and "поднимаю сессию" not in glue_log,
+      str([(job["name"], job["status"]) for job in gluers]) + " | " + glue_log[-300:])
 check("сборке отдали каталог с частями в томе и их количество",
       f"частей найдено {len(finished)}, ждём {len(finished)}" in glue_log
-      and str(pathlib.Path(STATE, "data", "parts")) in glue_log,
-      glue_log[-400:])
+      and all((pathlib.Path(STATE, "data", "parts") / chain_parts / f"part-{index}").is_dir()
+              for chain_parts in [item.name for item in pathlib.Path(STATE, "data", "parts").iterdir()]
+              for index in (1, 2)),
+      glue_log[-300:])
 check("архив собранной книги лежит в результатах и бот на него ссылается",
       bool(gluers) and all(job.get("result") and pathlib.Path(job["result"]).is_file() for job in gluers),
       str([(job.get("result"), job.get("note")) for job in gluers]))
