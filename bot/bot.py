@@ -26,6 +26,7 @@ import threading
 import time
 
 import colab_auth
+import settings as bot_settings
 from jobs import Jobs, safe_stem
 from tgapi import Bot, TelegramError
 
@@ -58,6 +59,9 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /eta — сколько уже сделано и сколько осталось (по сегментам книги)
 /usage — остаток и активные машины аккаунта
 /help — эта подсказка
+
+Как обрабатывать книги (целиком или с разбивкой на части), по сколько часов резать длинные книги
+и копировать ли их на Google Drive — настраивается на странице, в блоке «Настройки».
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
 Меню висит внизу под полем ввода — «Статус», «Задания», «Сколько осталось», «Журнал», «Остаток»,
@@ -303,6 +307,9 @@ class App:
         self.jobs = Jobs(DATA, PIPELINE, max_jobs=MAX_JOBS)
         self.state = self.load_state()
         self.colab = ColabLogin(pathlib.Path(TOKEN_FILE))
+        # Настройки обработки (режим, порог нарезки, Drive) — в томе: переживают обновление
+        # образа. Меняются на странице, здесь объект общий со страницей.
+        self.settings = bot_settings.Settings(DATA / "settings.json")
         self.menu_chats = set()          # чаты, где постоянное меню уже поставлено (на этот запуск)
 
     # ────────────────────────────── состояние ──────────────────────────────
@@ -777,6 +784,7 @@ class App:
                 job.meta["chat_id"] = owner
                 job.save()
         try:
+            job.log_line(self.settings.job_line())
             self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
@@ -858,7 +866,8 @@ def main() -> int:
         import web
         port = int(os.environ.get("WEB_PORT", "8090"))
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
-                          stop=app.stop_for_web, login=app.colab, notify=app.notify_owner)
+                          stop=app.stop_for_web, login=app.colab, notify=app.notify_owner,
+                          settings=app.settings)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "

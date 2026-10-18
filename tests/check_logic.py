@@ -12,6 +12,7 @@ sys.path.insert(0, str(HERE.parent / "bot"))
 
 import bot as botmod          # noqa: E402
 import jobs as jobs_mod       # noqa: E402
+import settings as settings_mod  # noqa: E402
 import web as webmod          # noqa: E402
 from jobs import Jobs, safe_stem, DRIVE_LINK_RE  # noqa: E402
 
@@ -242,6 +243,37 @@ check("кнопка «Сколько осталось» распознаётся
 answer = press_text("/eta")
 check("команда /eta отвечает процентами и остатком",
       any("не собирается" in text or "осталось" in text for text, _ in answer), str(answer)[:160])
+
+# ── настройки обработки: режим, порог нарезки, Drive ─────────────────────
+settings_path = work / "settings.json"
+options = settings_mod.Settings(settings_path)
+check("умолчания: книга целиком, части по 1.5 ч, Drive включён",
+      (options.mode, options.parts_hours, options.drive) == (settings_mod.MODE_BOOK, 1.5, True)
+      and "одна книга целиком" in options.summary(), options.summary())
+message = options.update({"mode": "parts", "parts_hours": "2.5", "drive": "off"})
+check("настройки меняются и сохраняются в том",
+      options.mode == settings_mod.MODE_PARTS and options.parts_hours == 2.5 and options.drive is False
+      and "сохранены" in message and settings_path.is_file(), message)
+check("настройки переживают перезапуск (читаются из файла)",
+      settings_mod.Settings(settings_path).mode == settings_mod.MODE_PARTS)
+bad_options = options.update({"mode": "what", "parts_hours": "99", "drive": "on"})
+check("неправильные настройки не применяются и объясняют причину",
+      options.mode == settings_mod.MODE_PARTS and options.parts_hours == 2.5 and not options.drive
+      and "не изменены" in bad_options and "режим" in bad_options and "порог" in bad_options,
+      bad_options)
+settings_path.write_text("{это не json", encoding="utf-8")
+check("битый файл настроек не мешает работать",
+      settings_mod.Settings(settings_path).mode == settings_mod.MODE_BOOK)
+parts_options = settings_mod.Settings(settings_path)
+parts_options.update({"mode": "parts", "parts_hours": "1.5", "drive": "on"})
+check("режим печатается в журнал задания словами",
+      "разбивкой на части" in parts_options.job_line() and "1.5" in parts_options.job_line(),
+      parts_options.job_line())
+whole_options = settings_mod.Settings(settings_path)
+whole_options.update({"mode": "book", "parts_hours": "1.5", "drive": "on"})
+check("режим «целиком» пишет, что нарезка не действует",
+      "без нарезки" in whole_options.job_line() and "не действует" in whole_options.job_line(),
+      whole_options.job_line())
 
 # ── жизненный цикл задания на заглушке конвейера ──
 data = work / "data"

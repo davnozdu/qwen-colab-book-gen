@@ -187,6 +187,41 @@ check("вход со страницы продублирован в Telegram", "
 check("повтор со страницы продублирован в Telegram", "запущено со страницы" in sent_text)
 check("загрузка со страницы продублирована в Telegram", "загружено со страницы" in sent_text)
 
+# ── 3д. настройки: режим обработки, порог нарезки, копирование на Drive ────
+def post_form(path: str, fields: dict):
+    """Форма обычным способом (как браузер): application/x-www-form-urlencoded."""
+    return post(path, urllib.parse.urlencode(fields).encode(), "application/x-www-form-urlencoded")
+
+
+code, page = get("/")
+check("на странице есть блок настроек",
+      code == 200 and "Как обрабатывать книги".encode() in page and "Настройки".encode() in page)
+
+code, _, _ = post_form("/settings", {"mode": "parts", "parts_hours": "2", "drive": "on"})
+after = get("/")[1]
+check("режим переключается на «с разбивкой на части»",
+      code == 303 and "режим «с разбивкой на части»".encode() in after, f"код {code}")
+check("и страница честно говорит, что путь частей ещё собирается",
+      "Путь частей ещё собирается".encode() in after)
+
+code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "99", "drive": "on"})
+after = get("/")[1]
+check("неправильный порог не применяется — режим остаётся прежним",
+      code == 303 and "режим «с разбивкой на части»".encode() in after
+      and "не изменены".encode() in after, f"код {code}")
+
+code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "1.5"})     # флажок снят
+after = get("/")[1]
+check("снятый флажок выключает копирование на Google Drive",
+      "Google Drive: нет".encode() in after and "режим «одна книга целиком»".encode() in after)
+check("настройки легли в том (переживут обновление образа)",
+      (WORK / "data" / "settings.json").is_file()
+      and json.loads((WORK / "data" / "settings.json").read_text(encoding="utf-8"))["mode"] == "book")
+post_form("/settings", {"mode": "book", "parts_hours": "1.5", "drive": "on"})   # вернуть как было
+
+check("что нажали на странице, ушло в Telegram", "Настройки со страницы" in sent_text)
+
 bad = [name for name, ok in results if not ok]
+
 print(f"  (проверок: {len(results)}, время {time.time() - started:.0f} с)")
 sys.exit(1 if bad else 0)

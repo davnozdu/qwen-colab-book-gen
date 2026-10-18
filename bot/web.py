@@ -27,6 +27,8 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import settings as bot_settings
+
 PER_PAGE = 20
 MAX_UPLOAD = 200 * 1024 * 1024        # потолок книги со страницы: том не должен умереть от одного файла
 
@@ -138,7 +140,7 @@ class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
-                 notify=None):
+                 notify=None, settings=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -147,6 +149,9 @@ class WebApp:
         self.notify = notify or (lambda text: None)
         # login — объект с методами state(), begin(), submit(code), reset(), usage()
         self.login = login
+        # Настройки (режим обработки, порог нарезки, копирование на Drive) лежат в томе и меняются
+        # на этой же странице. Объект общий с ботом, поэтому страница и бот видят одни значения.
+        self.settings = settings
         self.last_message = ""
 
     # ────────────────────────────── запросы ──────────────────────────────
@@ -258,6 +263,18 @@ class WebApp:
             return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
+        if method == "POST" and where == "/settings":
+            if self.settings is None:
+                return self.redirect("/", "Настройки недоступны в этой сборке.")
+            fields = form_fields(content_type, body)
+            raw = {name: (field.get("data") or b"").decode("utf-8", "replace").strip()
+                   for name, field in fields.items()}
+            # Флажок: когда он снят, в форме его просто нет. Поэтому «нет» передаём явно —
+            # иначе сохранение тихо вернуло бы копирование на Drive обратно.
+            raw["drive"] = "on" if "drive" in fields else "off"
+            message = self.settings.update(raw)
+            self.notify("Настройки со страницы. " + message)
+            return self.redirect("/", message)
         if method == "POST" and where == "/colab/usage":
             return self.redirect("/", self.login_call("usage"))
         return 404, "text/plain; charset=utf-8", "нет такой страницы".encode(), {}
@@ -310,8 +327,7 @@ class WebApp:
   <input type="file" name="book" accept=".epub" {"disabled" if busy else ""}>
   <button type="submit" {"disabled" if busy else ""}>Загрузить и запустить</button>
 </form>
-<div class="muted" style="margin-top:8px">Только EPUB. Книги длиннее {self.max_hours:g} ч режутся
-на части автоматически. Одна книга за раз.</div>{hint}</div>"""
+<div class="muted" style="margin-top:8px">Только EPUB. {self.mode_hint()} Одна книга за раз.</div>{hint}</div>"""
 
         rows = [self.job_row(job) for job in page_slice(jobs, page)]
         if not rows:
@@ -326,8 +342,47 @@ class WebApp:
                  + "\n".join(rows) + "</table>"
                  + pager(page, len(jobs), "/") + "</div>")
 
-        return upload + self.colab_card() + table + self.files_card("/files", "Книги в папке", "books") \
+        return upload + self.settings_card() + self.colab_card() + table \
+            + self.files_card("/files", "Книги в папке", "books") \
             + self.files_card("/results", "Готовые архивы", "results")
+
+    def mode_hint(self) -> str:
+        """Что будет с книгой при загрузке — словами, а не догадками по журналу."""
+        if self.settings is None:
+            return f"Книги длиннее {self.max_hours:g} ч режутся на части автоматически."
+        if self.settings.mode == bot_settings.MODE_PARTS:
+            return (f"Режим «с разбивкой на части»: книги длиннее {self.settings.parts_hours:g} ч "
+                    f"собираются по частям, склейка — в конце.")
+        return "Режим «одна книга целиком»: книга идёт одним прогоном, без нарезки."
+
+    def settings_card(self) -> str:
+        """Админка: как обрабатывать книги. Настройки те же, что видит бот, и живут в томе."""
+        if self.settings is None:
+            return ""
+        options = "".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == self.settings.mode else ""}>'
+            f'{html.escape(title)}</option>'
+            for value, title in bot_settings.MODES.items())
+        note = ""
+        if self.settings.mode == bot_settings.MODE_PARTS:
+            # Честно: режим уже выбирается, но путь частей добавляется отдельным шагом.
+            note = ('<div class="note">Путь частей ещё собирается: пока книга идёт целиком, как в '
+                    'режиме «одна книга целиком». Строка исчезнет, когда части заработают.</div>')
+        return (f'<div class="card"><h2>Настройки</h2>'
+                f'<form method="post" action="/settings">'
+                f'<div><label>Как обрабатывать книги</label><br>'
+                f'<select name="mode">{options}</select></div>'
+                f'<div style="margin-top:8px"><label>Длинные книги резать на части по</label> '
+                f'<input type="number" name="parts_hours" step="0.5" min="0.5" max="12" '
+                f'value="{self.settings.parts_hours:g}" style="width:5em"> ч</div>'
+                f'<div style="margin-top:8px"><label>'
+                f'<input type="checkbox" name="drive"{" checked" if self.settings.drive else ""}> '
+                f'копировать книгу на Google Drive</label></div>'
+                f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
+                f'</form>'
+                f'<div class="muted" style="margin-top:8px">Сейчас: '
+                f'{html.escape(self.settings.summary())}</div>{note}</div>')
+
 
     def job_row(self, job) -> str:
         meta = job.meta

@@ -128,6 +128,13 @@ class Job:
             return ""
         return text[-limit:]
 
+    def log_line(self, text: str) -> None:
+        """Дописать строку в журнал задания. Так в журнале остаётся след о том, каким путём
+        пошла книга (режим, порог нарезки) — иначе через месяц этого не восстановить."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        with self.log.open("a", encoding="utf-8") as handle:
+            handle.write(str(text).rstrip() + "\n")
+
     def progress(self) -> dict:
         """Проценты и оценка остатка по журналу.
 
