@@ -495,7 +495,10 @@ class App:
 
     def finish_chain(self, chain, job) -> None:
         """Все части готовы → финал: склейка, громкость по всей книге, музыка, сборка — в контейнере."""
-        final = self.jobs.by_id(chain.meta.get("final_job") or "")
+        # Ищем задание сборки только по НЕПУСТОЙ метке: by_id("") отдаёт первое попавшееся задание,
+        # и книга «собиралась» бы из чужого результата, ничего на самом деле не собирая.
+        marker = str(chain.meta.get("final_job") or "")
+        final = self.jobs.by_id(marker) if marker else None
         if final is None:
             self.start_glue(chain, job)
             return
@@ -523,7 +526,8 @@ class App:
 
     def start_glue(self, chain, job) -> None:
         """Запускает сборку книги из готовых частей. Повторный вызов только следит, не запускает второй раз."""
-        running = self.jobs.by_id(chain.meta.get("final_job") or "")
+        marker = str(chain.meta.get("final_job") or "")
+        running = self.jobs.by_id(marker) if marker else None
         if running is not None and running.status in ("queued", "running"):
             return
         glue = PIPELINE / "glue_book.py"
