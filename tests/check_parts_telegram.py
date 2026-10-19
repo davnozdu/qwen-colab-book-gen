@@ -241,7 +241,8 @@ check("страница: «повторить» у части — повтор �
       f"заданий было {before}, стало {len(app.jobs.load())}")
 asking = app.jobs.add("long.epub", CHAT, long_book)
 app.ask_split(asking, long_book)
-html_page = page.route("GET", "/")[2].decode("utf-8", "replace")
+# Строку именно этого задания: в списке по 10 оно может оказаться и на второй странице.
+html_page = page.job_row(app.jobs.by_id(asking.id))
 check("страница: у ждущей книги те же две кнопки", f"/choice/{asking.meta['session']}/cut" in html_page
       and f"/choice/{asking.meta['session']}/whole" in html_page)
 page.route("POST", f"/choice/{asking.meta['session']}/whole")
