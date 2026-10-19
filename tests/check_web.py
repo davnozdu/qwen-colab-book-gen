@@ -204,8 +204,9 @@ code, _, _ = post_form("/settings", {"mode": "parts", "parts_hours": "2", "drive
 after = get("/")[1]
 check("режим переключается на «с разбивкой на части»",
       code == 303 and "режим «с разбивкой на части»".encode() in after, f"код {code}")
-check("и страница честно говорит, что путь частей ещё собирается",
-      "Путь частей ещё собирается".encode() in after)
+check("и страница объясняет, что делает режим частей",
+      "Режим частей: книгу длиннее 2 ч".encode() in after
+      and "Путь частей ещё собирается".encode() not in after)
 
 code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "99", "drive": "on"})
 after = get("/")[1]

@@ -59,6 +59,45 @@ def shrink_step(python: str, pipeline: pathlib.Path, book: pathlib.Path, out: pa
     return done.returncode, plan
 
 
+CHARS_PER_SECOND = 14.0      # как в конвейере (shrink_book, audiobook_epub.select_excerpt)
+
+
+def estimate_hours(book) -> float:
+    """Сколько часов звука даст книга: видимый текст документов из spine по 14 знаков в секунду.
+
+    Нужна до всякой нарезки — чтобы спросить в Telegram, резать ли длинную книгу. Это та же
+    скорость, что у нарезки; паузы не считаем, так что оценка чуть ниже, чем у shrink_book.
+    Нечитаемая книга — 0.0: тогда не спрашиваем, книга идёт обычным путём, и ошибку покажет он.
+    """
+    import html
+    import posixpath
+    import re
+    import urllib.parse
+    import zipfile
+    try:
+        with zipfile.ZipFile(book) as archive:
+            container = archive.read("META-INF/container.xml").decode("utf-8", "replace")
+            opf_name = re.search(r'full-path="([^"]+)"', container).group(1)
+            opf = archive.read(opf_name).decode("utf-8", "replace")
+            items = {m.group("id"): m.group("href") for m in re.finditer(
+                r'<(?:\w+:)?item\b(?=[^>]*\bid="(?P<id>[^"]+)")(?=[^>]*\bhref="(?P<href>[^"]+)")[^>]*>', opf)}
+            chars = 0
+            for idref in re.findall(r'<(?:\w+:)?itemref\b[^>]*\bidref="([^"]+)"', opf):
+                href = items.get(idref)
+                if not href:
+                    continue
+                name = posixpath.normpath(posixpath.join(posixpath.dirname(opf_name), urllib.parse.unquote(href)))
+                if name not in archive.namelist():
+                    continue
+                page = archive.read(name).decode("utf-8", "replace")
+                body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", page.split("<body", 1)[-1])
+                text = html.unescape(re.sub(r"<[^>]+>", " ", body))
+                chars += len(" ".join(text.split()))
+    except (OSError, KeyError, AttributeError, zipfile.BadZipFile):
+        return 0.0
+    return chars / CHARS_PER_SECOND / 3600
+
+
 def parts_from_plan(plan: dict, book: pathlib.Path) -> list[dict]:
     """Части по плану нарезки. План без частей (parts <= 1) — книга влезает целиком, часть одна."""
     files = [item for item in (plan.get("files") or []) if item.get("epub")]
@@ -121,7 +160,9 @@ class Chain:
 
     def set_parts(self, parts: list) -> None:
         """Раскладывает части по номеру: у каждой свой epub, название и состояние."""
-        self.meta["parts"] = [dict(part, status=PART_QUEUED, job_id="", retries=0,
+        # job_id приходит вместе с частью: цепочка сохраняется ОДИН раз и сразу целой. Иначе
+        # проход демона успевал увидеть части без заданий и портил их (см. bot.split_chain).
+        self.meta["parts"] = [dict(part, status=PART_QUEUED, job_id=part.get("job_id", ""), retries=0,
                                    result="", note="") for part in parts]
         self.meta["total"] = len(self.meta["parts"])
         self.meta["status"] = RUNNING

@@ -151,7 +151,8 @@ class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
-                 notify=None, settings=None, chains=None, continue_chain=None, glue=None):
+                 notify=None, settings=None, chains=None, continue_chain=None, glue=None,
+                 ask_split=None, choose_split=None, retry_part=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -167,6 +168,11 @@ class WebApp:
         self.chains = chains
         self.continue_chain = continue_chain or (lambda chain_id: "Продолжение недоступно.")
         self.glue = glue or (lambda chain_id: "Сборка книги недоступна.")
+        # Длинная книга в режиме частей: «резать или одним файлом» — тот же вопрос, что в Telegram.
+        self.ask_split = ask_split or (lambda job, book: False)
+        self.choose_split = choose_split or (lambda job_id, cut: "Выбор недоступен в этой сборке.")
+        # «Повторить» у части книги перезапускает её в своей цепочке, а не новой книгой.
+        self.retry_part = retry_part or (lambda job_id: "Повтор части недоступен в этой сборке.")
         self.last_message = ""
 
     # ────────────────────────────── запросы ──────────────────────────────
@@ -234,10 +240,22 @@ class WebApp:
             job = self.jobs.by_id(path_las(parsed.path))
             if job is None:
                 return self.redirect("/", "Такого задания нет.")
+            if job.meta.get("chain") and job.meta.get("part_index"):
+                message = self.retry_part(job.id)
+                self.notify("Повтор части со страницы. " + message)
+                return self.redirect("/", message)
             book = pathlib.Path(job.meta.get("book") or "")
             if not book.is_file():
                 return self.redirect("/", f"Файла «{book.name}» больше нет в папке — пришлите книгу заново.")
             return self.run_existing(book.name)
+        if method == "POST" and parsed.path.startswith("/choice/"):
+            # /choice/<задание>/cut|whole — ответ на «резать ли длинную книгу»
+            pieces = parsed.path.strip("/").split("/")
+            if len(pieces) != 3 or pieces[2] not in ("cut", "whole"):
+                return self.redirect("/", "Непонятный выбор: резать (cut) или одним файлом (whole).")
+            message = self.choose_split(urllib.parse.unquote(pieces[1]), pieces[2] == "cut")
+            self.notify("Выбор со страницы. " + message)
+            return self.redirect("/", message)
         if method == "POST" and where == "/stop":                    # остановить всё
             jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
             for job in jobs:
@@ -443,9 +461,11 @@ class WebApp:
             for value, title in bot_settings.MODES.items())
         note = ""
         if self.settings.mode == bot_settings.MODE_PARTS:
-            # Честно: режим уже выбирается, но путь частей добавляется отдельным шагом.
-            note = ('<div class="note">Путь частей ещё собирается: пока книга идёт целиком, как в '
-                    'режиме «одна книга целиком». Строка исчезнет, когда части заработают.</div>')
+            note = (f'<div class="note">Режим частей: книгу длиннее {self.settings.parts_hours:g} ч бот '
+                    f'режет по абзацам; каждая часть уходит в облако только на синтез, сырьё '
+                    f'возвращается в том, готовая часть приходит архивом. Когда готовы все части — '
+                    f'склейка, громкость, музыка и сборка книги здесь, в контейнере. Google Drive в '
+                    f'этом режиме не используется.</div>')
         return (f'<div class="card"><h2>Настройки</h2>'
                 f'<form method="post" action="/settings">'
                 f'<div><label>Как обрабатывать книги</label><br>'
@@ -456,6 +476,10 @@ class WebApp:
                 f'<div style="margin-top:8px"><label>'
                 f'<input type="checkbox" name="drive"{" checked" if self.settings.drive else ""}> '
                 f'копировать книгу на Google Drive</label></div>'
+                f'<div style="margin-top:8px"><label>Считать сборку зависшей, если нет движения</label> '
+                f'<input type="number" name="stall_minutes" step="5" min="0" max="600" '
+                f'value="{self.settings.stall_minutes}" style="width:5em"> мин '
+                f'<span class="muted">(журнал не растёт — машину гасим и пишем предупреждение; 0 — не следить)</span></div>'
                 f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
                 f'</form>'
                 f'<div class="muted" style="margin-top:8px">Сейчас: '
@@ -465,13 +489,13 @@ class WebApp:
     def job_row(self, job) -> str:
         meta = job.meta
         icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
-                 "splitting": "✂️", "waiting": "🧩"}
+                 "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
         chain = self.chains.by_id(meta.get("chain") or "") if self.chains is not None else None
         tail = ""
-        if job.status in ("splitting", "waiting") and chain is not None:
+        if job.status in ("splitting", "waiting", "gluing") and chain is not None:
             # Книга с частями: строки журнала тут ни о чём — важно, где цепочка.
             tail = (f'<div class="muted">{html.escape(chain.summary())} · порог '
                     f'{float(chain.meta.get("parts_hours") or 0):g} ч</div>')
@@ -504,7 +528,14 @@ class WebApp:
                            f'времени до конца">сколько осталось</a>')
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
-        elif job.status in ("splitting", "waiting") and chain is not None:
+        elif job.status == "choice":
+            # Длинная книга ждёт решения — те же две кнопки, что в Telegram.
+            for choice, label, hint in (("cut", "резать на части", "Части озвучатся по одной, книга "
+                                         "соберётся здесь в конце"),
+                                        ("whole", "одним файлом", "Одним прогоном машины, без нарезки")):
+                actions.append(f'<form class="inline" method="post" action="/choice/{job.meta["session"]}/'
+                               f'{choice}"><button type="submit" title="{hint}">{label}</button></form>')
+        elif job.status in ("splitting", "waiting", "gluing") and chain is not None:
             # Книга с частями: «повторить» у неё бессмысленно (машину она не занимает), зато нужна
             # кнопка «продолжить» — ею цепочка поднимается после сбоя или перезапуска бота.
             actions.append('<form class="inline" method="post" action="/chain/continue/'
@@ -721,6 +752,9 @@ class WebApp:
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
                                        "«остановить всё».")
         job = self.jobs.add(book.name, "", book)
+        if self.ask_split(job, book):
+            return self.redirect("/", f"«{book.name}» длинная — выберите в строке задания: резать на "
+                                      f"части или одним файлом (вопрос продублирован в Telegram).")
         self.launch_job(job)
         self.notify(f"🔁 Повторяю сборку «{book.name}» (запущено со страницы).")
         return self.redirect("/", f"Повторяю сборку «{book.name}» — о ходе напишу.")
@@ -745,6 +779,9 @@ class WebApp:
         staging.write_bytes(data)              # сначала целиком во временный файл…
         staging.replace(target)                # …и только потом на место книги
         job = self.jobs.add(name, "", target)
+        if self.ask_split(job, target):
+            return self.redirect("/", f"Принял «{name}»: книга длинная — выберите в строке задания, "
+                                      f"резать на части или одним файлом (вопрос продублирован в Telegram).")
         self.launch_job(job)
         self.notify(f"📖 Принял «{name}» ({len(data) / 1e6:.1f} МБ) — загружено со страницы, "
                     f"сборка пошла.")

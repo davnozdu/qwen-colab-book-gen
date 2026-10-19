@@ -135,7 +135,7 @@ check("сборке отдали каталог с частями в томе и
       and all((pathlib.Path(STATE, "data", "parts") / chain_parts / f"part-{index}").is_dir()
               for chain_parts in [item.name for item in pathlib.Path(STATE, "data", "parts").iterdir()]
               for index in (1, 2)),
-      glue_log[-300:])
+      f"частей-заданий {len(finished)}: " + str([(job['name'], job['status']) for job in finished]) + " | " + glue_log[-200:])
 check("архив собранной книги лежит в результатах и бот на него ссылается",
       bool(gluers) and all(job.get("result") and pathlib.Path(job["result"]).is_file() for job in gluers),
       str([(job.get("result"), job.get("note")) for job in gluers]))

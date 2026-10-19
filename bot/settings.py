@@ -10,8 +10,8 @@
   parts — «с разбивкой на части»: бот режет книгу, части синтезируются в облаке по одной, а
           склейка, громкость, музыка и сборка книги идут в контейнере, на постоянном томе.
 
-Пока режим частей только выбирается и печатается в журнал: сам путь частей добавляется отдельными
-шагами, поэтому оба режима пока ведут на существующий путь «одна книга целиком».
+По умолчанию — book. Флажок Google Drive действует только в режиме book: в режиме частей всё
+возвращается в том бота, Drive не участвует. Подробно — docs/parts-and-glue.md.
 """
 from __future__ import annotations
 
@@ -22,7 +22,8 @@ MODE_BOOK = "book"
 MODE_PARTS = "parts"
 MODES = {MODE_BOOK: "одна книга целиком, без нарезки",
          MODE_PARTS: "с разбивкой на части"}
-DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True}
+DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30}
+STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 HOURS_MIN, HOURS_MAX = 0.5, 12.0
 TRUTHY = {"1", "on", "true", "yes", "да", "вкл"}
 
@@ -49,6 +50,15 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"порог части должен быть от {HOURS_MIN:g} до {HOURS_MAX:g} ч")
     except (TypeError, ValueError):
         problems.append("порог части должен быть числом (например, 1.5)")
+    stall = values.get("stall_minutes", DEFAULTS["stall_minutes"])
+    try:
+        minutes = int(float(str(stall).replace(",", ".")))
+        if minutes == 0 or STALL_MIN <= minutes <= STALL_MAX:
+            clean["stall_minutes"] = minutes
+        else:
+            problems.append(f"порог зависания — 0 (не следить) или от {STALL_MIN} до {STALL_MAX} мин")
+    except (TypeError, ValueError):
+        problems.append("порог зависания должен быть числом минут (например, 30)")
     drive = values.get("drive", DEFAULTS["drive"])
     clean["drive"] = drive if isinstance(drive, bool) else str(drive).strip().lower() in TRUTHY
     return clean, problems
@@ -96,14 +106,21 @@ class Settings:
     def drive(self) -> bool:
         return bool(self.values["drive"])
 
+    @property
+    def stall_minutes(self) -> int:
+        return int(self.values.get("stall_minutes", DEFAULTS["stall_minutes"]))
+
     def title(self) -> str:
         return MODES[self.mode]
 
     def summary(self) -> str:
         line = (f"режим «{self.title()}», части по {self.parts_hours:g} ч, "
-                f"Google Drive: {'да' if self.drive else 'нет'}")
+                f"Google Drive: {'да' if self.drive else 'нет'}, "
+                f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}")
         if self.mode == MODE_BOOK:
             line += " (в этом режиме нарезка не используется)"
+        else:
+            line += " (в этом режиме Google Drive не используется)"
         return line
 
     def job_line(self) -> str:

@@ -121,6 +121,18 @@ class Job:
         (self.path / "meta.json").write_text(json.dumps(self.meta, ensure_ascii=False, indent=2),
                                              encoding="utf-8")
 
+    def last_activity(self) -> float:
+        """Когда задание последний раз подавало признаки жизни: последняя запись в журнал.
+
+        Синтез пишет строку на каждый сегмент, стадии — свои строки: у живой сборки журнал растёт.
+        """
+        moments = [float(self.meta.get("started") or self.meta.get("created") or 0)]
+        try:
+            moments.append(self.log.stat().st_mtime)
+        except OSError:
+            pass
+        return max(moments)
+
     def tail(self, limit: int = 3500) -> str:
         try:
             text = self.log.read_text(encoding="utf-8", errors="replace")
@@ -444,6 +456,10 @@ class Jobs:
         return jobs
 
     def by_id(self, job_id: str):
+        # Пустой номер — это «задания нет», а не «первое попавшееся»: startswith("") истинно для
+        # любого задания, и проход по цепочкам однажды выдал части статус родителя.
+        if not job_id:
+            return None
         for job in self.load():
             if job.id == job_id or job.id.startswith(job_id) or job.meta["session"] == job_id:
                 return job

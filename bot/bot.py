@@ -42,6 +42,7 @@ DRIVE_DIR = os.environ.get("DRIVE_DIR", "Audiobooks-colab")
 SHRINK_HOURS = float(os.environ.get("SHRINK_HOURS", "7"))
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "1"))
 POLL = int(os.environ.get("POLL_SECONDS", "10"))
+LAUNCH_LOCK = threading.RLock()     # запуск заданий: очередь бота и страница работают в разных потоках
 
 HELP = """Я собираю аудиокниги через Google Colab.
 
@@ -364,12 +365,58 @@ class App:
 
     def tick(self) -> None:
         """Завершившиеся задания: итог в чат; затем запускаем то, что стоит в очереди."""
+        self.watchdog()
         for job in self.jobs.refresh().values():
             self.report(job)
         self.chains_pass()
         for job in reversed(self.jobs.load()):
             if job.status == "queued" and self.jobs.free_slot():
                 self.launch(job)
+
+    def activity(self, job) -> float:
+        """Последний признак жизни. Сборка книги в контейнере кодирует звук ffmpeg-ом молча
+        (журнал минутами не растёт), поэтому для неё движение — это и растущие файлы склейки."""
+        moment = job.last_activity()
+        chain = self.chains.by_id(job.meta.get("chain") or "") if job.meta.get("glue") else None
+        if chain is not None:
+            work = self.parts_dir(chain) / "glue"
+            try:
+                for path in work.rglob("*"):
+                    moment = max(moment, path.stat().st_mtime)
+            except OSError:
+                pass
+        return moment
+
+    def watchdog(self) -> None:
+        """Сторож зависаний: у идущей сборки журнал растёт (сегменты, стадии). Не растёт дольше
+        порога из админки — машина, скорее всего, зависла: гасим её, освобождаем ускоритель и
+        пишем предупреждение. Задание становится упавшим: обычная книга получает кнопку «повторить»,
+        часть книги бот повторит сам (а после второго раза спросит), сборка книги — «собрать книгу».
+        """
+        settings = getattr(self, "settings", None)
+        limit = settings.stall_minutes if settings is not None else 0
+        if not limit:
+            return
+        now = time.time()
+        for job in self.jobs.load():
+            if job.status != "running":
+                continue
+            idle = now - self.activity(job)
+            if idle < limit * 60:
+                continue
+            note = (f"нет движения {idle / 60:.0f} мин (порог {limit} мин) — похоже, машина зависла: "
+                    f"остановил её и освободил ускоритель")
+            job.log_line("сторож: " + note)
+            try:
+                self.jobs.stop(job)
+            except Exception as exc:
+                job.log_line(f"сторож: остановить не вышло ({exc})")
+            job.meta.update({"status": "failed", "finished": now, "note": note, "stalled": True})
+            job.save()
+            member = job.meta.get("chain") and (job.meta.get("part_index") or job.meta.get("glue"))
+            self.send_to_job_chat(job, f"⏱ «{job.meta['name']}»: {note}."
+                                       + ("" if member else "\nПовторить сборку?"),
+                                  buttons=None if member else failed_menu(job.meta["session"]))
 
     # ────────────────────────────── части книги ──────────────────────────────
     def start_chain(self, job, book: pathlib.Path) -> None:
@@ -404,24 +451,29 @@ class App:
                              "note": "нарезка на части не удалась: смотрите журнал"})
             job.save()
             self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: нарезка на части не удалась. "
-                                       f"Журнал — на странице, кнопка «журнал».")
+                                       f"Журнал — на странице, кнопка «журнал».",
+                                  buttons=[[("▶️ Нарезать заново", f"chain_continue:{chain.id}"),
+                                            ("✖️ Не надо", "menu")]])
             return
         parts = chains.parts_from_plan(plan, pathlib.Path(chain.meta["book"]))
+        # Сначала задания частей, потом ОДНО сохранение цепочки — уже с номерами заданий. Раньше
+        # цепочка сохранялась с частями без заданий, и проход демона в этот миг искал задание по
+        # пустому номеру: by_id("") отдаёт первое попавшееся (родителя), части получали его статус
+        # «splitting», номера заданий терялись — и книга не собиралась никогда.
+        for part in parts:
+            part_job = self.jobs.add(chain.title_of(part), job.meta.get("chat_id") or "",
+                                     pathlib.Path(part["epub"]))
+            part_job.meta.update({"chain": chain.id, "part_index": part["index"],
+                                  "parts_total": len(parts), "parts_done": 0})
+            part_job.log_line(f"часть {part['index']} из {len(parts)} книги "
+                              f"«{chain.meta.get('name')}» (≈{part['hours']:.2f} ч звука)")
+            part_job.save()
+            part["job_id"] = part_job.id
         chain.set_parts(parts)
         chain.log_line(f"частей: {len(parts)} — "
                        + ", ".join(f"{part['index']}:{part['hours']:.2f} ч" for part in parts))
         job.meta.update({"parts_total": len(parts), "parts_done": 0, "part_index": 0})
         job.save()
-        for part in chain.parts:
-            job_id = self.jobs.add(chain.title_of(part), job.meta.get("chat_id") or "",
-                                   pathlib.Path(part["epub"]))
-            job_id.meta.update({"chain": chain.id, "part_index": part["index"],
-                                "parts_total": len(chain.parts), "parts_done": 0})
-            job_id.log_line(f"часть {part['index']} из {len(chain.parts)} книги "
-                            f"«{chain.meta.get('name')}» (≈{part['hours']:.2f} ч звука)")
-            job_id.save()
-            part["job_id"] = job_id.id
-        chain.save()
         job.log_line(f"частей: {len(chain.parts)} — поставил в очередь, пойдут по одной")
         self.send_to_job_chat(job, f"✂️ «{job.meta['name']}» разрезана на {len(chain.parts)} "
                                    f"част. Первая часть уже в очереди, дальше пойдут сами.")
@@ -435,8 +487,10 @@ class App:
             if chain.status == chains.SPLIT:
                 continue                                  # нарезка идёт в своём потоке
             changed = False
+            if any(not part.get("job_id") for part in chain.parts):
+                continue                                  # части ещё раздаются заданиям
             for part in chain.parts:
-                part_job = self.jobs.by_id(part.get("job_id") or "")
+                part_job = self.jobs.by_id(part["job_id"])
                 if part_job is None:
                     continue
                 if part_job.status != part.get("status"):
@@ -473,17 +527,79 @@ class App:
                 if chain.status != chains.FAILED:
                     reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды. "
                               f"Дальше идти нельзя: книга получится с дырой. "
-                              f"На странице — «продолжить генерацию».")
+                              f"Повторить её — кнопкой здесь или «продолжить генерацию» на странице.")
                     chain.hold(reason)
+                    self.hold_part_jobs(chain)
                     job.meta.update({"status": "waiting", "note": reason})
                     job.save()
                     job.log_line(f"остановлено: {reason}")
-                    self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}")
+                    part_job = self.jobs.by_id(part.get("job_id") or "")
+                    note = (part_job.meta.get("note") or "") if part_job else ""
+                    self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}"
+                                               + (f"\nПричина: {note}" if note else "")
+                                               + "\n\nПовторить часть?",
+                                          buttons=self.part_buttons(chain, part))
                     return
 
             if chain.all_done() and chain.status != chains.DONE:
                 self.finish_chain(chain, job)
                 return
+
+    def hold_part_jobs(self, chain) -> None:
+        """Остановленная цепочка не должна запускать следующие части сама.
+
+        hold() помечает части в цепочке, но их задания стоят в очереди как «queued» — очередь их и
+        запускала, а проход по цепочкам тут же перетирал пометку статусом задания. Придерживаем
+        сами задания; «продолжить генерацию» и «повторить» ставят их обратно в очередь.
+        """
+        for part in chain.held():
+            part_job = self.jobs.by_id(part.get("job_id") or "")
+            if part_job is not None and part_job.status == "queued":
+                part_job.meta.update({"status": chains.PART_HELD, "note": part.get("note") or ""})
+                part_job.log_line("придержано: цепочка остановлена, ждёт решения")
+                part_job.save()
+
+    def part_buttons(self, chain, part) -> list:
+        """Кнопки под сообщением об упавшей части — те же действия, что на странице."""
+        part_job = self.jobs.by_id(part.get("job_id") or "")
+        rows = []
+        if part_job is not None:
+            rows.append([("🔁 Повторить часть", f"part_retry:{part_job.id}"),
+                         ("✖️ Нет", "menu")])
+            rows.append([("📜 Журнал части", f"log:{part_job.meta.get('session') or part_job.id}")])
+        rows.append([("▶️ Продолжить генерацию", f"chain_continue:{chain.id}")])
+        return rows
+
+    def retry_part(self, job_id: str) -> str:
+        """«Повторить» у части книги: перезапускает ИМЕННО её, в своей цепочке.
+
+        Отдельное задание из epub части тут не годится: цепочка о нём не узнала бы, а в режиме
+        частей такая «книга» ещё и пошла бы резаться сама. Если цепочка остановилась на этой части,
+        продолжаем её целиком — дальше автоматика идёт сама.
+        """
+        part_job = self.jobs.by_id(job_id)
+        if part_job is None:
+            return "Такой части уже нет."
+        chain = self.chains.by_id(part_job.meta.get("chain") or "")
+        part = chain.part_by_job(part_job.id) if chain else None
+        if chain is None or part is None:
+            return "Книга этой части больше не найдена — загрузите книгу заново."
+        if part_job.status in ("queued", "running") or part.get("status") in (chains.PART_QUEUED,
+                                                                              chains.PART_RUNNING):
+            return f"«{chain.meta.get('name')}»: часть {part['index']} уже в работе."
+        if part.get("status") == chains.PART_DONE:
+            return f"«{chain.meta.get('name')}»: часть {part['index']} уже готова — повторять нечего."
+        part["retries"] = 0
+        chain.save()
+        if chain.status == chains.FAILED:
+            return self.continue_chain(chain.id)
+        part["status"] = chains.PART_QUEUED
+        part["note"] = ""
+        chain.save()
+        part_job.meta.update({"status": "queued", "note": "", "finished": None, "result": ""})
+        part_job.log_line("повтор части по вашей команде")
+        part_job.save()
+        return f"«{chain.meta.get('name')}»: повторяю часть {part['index']}."
 
     def parts_dir(self, chain) -> pathlib.Path:
         """Сырьё частей в томе: переживёт и перезапуск бота, и обновление образа."""
@@ -514,15 +630,23 @@ class App:
             job.meta.update({"status": "done", "finished": time.time(), "note": note, "result": result})
             job.save()
             job.log_line(note)
-            self.send_to_job_chat(job, f"✅ «{job.meta['name']}»: {note}")
+            self.send_to_job_chat(job, f"✅ «{job.meta['name']}»: {note}", buttons=MENU)
+            return
+        # Об этой неудачной сборке уже сообщили: цепочка стоит, пока человек не решит. Без этой
+        # метки проход по цепочкам слал бы одно и то же сообщение на каждом круге.
+        if chain.meta.get("glue_reported") == final.id:
             return
         reason = (f"сборка книги не удалась: {final.meta.get('note') or 'смотрите журнал сборки'}. "
-                  f"Части целы — на странице есть «собрать книгу».")
+                  f"Части целы — собрать заново можно кнопкой здесь или «собрать книгу» на странице.")
         chain.hold(reason)
+        chain.meta["glue_reported"] = final.id
+        chain.save()
         job.meta.update({"status": "waiting", "note": reason})
         job.save()
         job.log_line(reason)
-        self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}")
+        self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}",
+                              buttons=[[("🧩 Собрать книгу", f"chain_glue:{chain.id}"), ("✖️ Нет", "menu")],
+                                       [("📜 Журнал сборки", f"log:{final.meta.get('session') or final.id}")]])
 
     def start_glue(self, chain, job) -> None:
         """Запускает сборку книги из готовых частей. Повторный вызов только следит, не запускает второй раз."""
@@ -624,7 +748,7 @@ class App:
         where = released[0]["index"] if released else (chain.first_unfinished() or {}).get("index")
         return f"«{chain.meta.get('name')}»: продолжаю с части {where}."
 
-    def send_to_job_chat(self, job, text: str) -> None:
+    def send_to_job_chat(self, job, text: str, buttons=None) -> None:
         """Сообщение по книге: в чат задания, а если его нет — владельцу."""
         chat_id = str(job.meta.get("chat_id") or "").strip()
         if not looks_like_chat_id(chat_id):
@@ -633,7 +757,10 @@ class App:
             print(f"[bot] {text}", flush=True)
             return
         try:
-            self.bot.send(chat_id, text)
+            if buttons:
+                self.bot.send(chat_id, text, buttons=buttons)
+            else:
+                self.bot.send(chat_id, text)
         except Exception as exc:
             print(f"[bot] сообщение о частях не ушло в {chat_id}: {exc}", flush=True)
 
@@ -754,6 +881,15 @@ class App:
         elif data == "stop_all":
             self.bot.send(chat_id, "Останавливаю всё…")
             self.in_background(chat_id, self.stop_all_jobs, "Остановка")
+        elif data.startswith(("cut:", "whole:")):      # длинная книга: резать или одним файлом
+            action, _, job_id = data.partition(":")
+            self.bot.send(chat_id, self.choose_split(job_id, action == "cut"))
+        elif data.startswith("part_retry:"):           # упавшая часть книги: повторить именно её
+            self.bot.send(chat_id, self.retry_part(data.partition(":")[2]))
+        elif data.startswith("chain_continue:"):       # «продолжить генерацию», как на странице
+            self.bot.send(chat_id, self.continue_chain(data.partition(":")[2]))
+        elif data.startswith("chain_glue:"):           # «собрать книгу», как на странице
+            self.bot.send(chat_id, self.glue_chain(data.partition(":")[2]))
         elif data.startswith(("repeat:", "log:")):     # из отчёта о неудаче: ровно та сборка
             action, _, session = data.partition(":")
             if self.jobs.by_id(session) is None:
@@ -818,7 +954,8 @@ class App:
         running = [job for job in jobs if job.status == "running"]
         queued = [job for job in jobs if job.status == "queued"]
         # Книга в режиме частей машину не занимает: её состояние — «режется» или «жду части».
-        chains_now = [job for job in jobs if job.status in ("splitting", "waiting")]
+        chains_now = [job for job in jobs if job.status in ("splitting", "waiting", "gluing")]
+        asking = [job for job in jobs if job.status == "choice"]
         lines = []
         for job in running:
             minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
@@ -831,10 +968,15 @@ class App:
             lines.append(f"✂️ {job.meta['name']} — {where}{note}")
         for job in queued:
             lines.append(f"⏳ {job.meta['name']} — в очереди")
+        for job in asking:
+            lines.append(f"❓ {job.meta['name']} — ≈{float(job.meta.get('hours_estimate') or 0):.1f} ч, "
+                         f"ждёт ответа: резать на части или одним файлом")
         head = (f"Сейчас: {len(running) + len(chains_now)} в работе, {len(queued)} в очереди.")
-        if not running and not queued and not chains_now:
+        if not running and not queued and not chains_now and not asking:
             head = "Свободно: ничего не собирается."
-        self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=MENU)
+        buttons = [[("✂️ Резать «" + job.meta["name"][:20] + "»", f"cut:{job.id}"),
+                    ("📄 Одним файлом", f"whole:{job.id}")] for job in asking[:3]] + MENU
+        self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=buttons)
 
     def show_eta(self, chat_id) -> None:
         """Сколько сделано и сколько осталось. Замеры копим: со второго раза точнее оценка."""
@@ -976,6 +1118,9 @@ class App:
         if job is None:
             self.bot.send(chat_id, "Что повторять? /repeat <номер из /jobs>")
             return
+        if job.meta.get("chain") and job.meta.get("part_index"):
+            self.bot.send(chat_id, self.retry_part(job.id))     # часть книги — повтор в своей цепочке
+            return
         book = pathlib.Path(job.meta.get("book") or "")
         if not book.is_file():
             self.bot.send(chat_id, f"Файла «{book.name}» больше нет в томе — пришлите книгу заново.")
@@ -984,6 +1129,8 @@ class App:
             self.bot.send(chat_id, "Сейчас идёт другая сборка — сначала /stop или дождитесь её конца.")
             return
         again = self.jobs.add(book.name, chat_id, book)
+        if self.ask_split(again, book):
+            return                                  # длинная книга: сначала спросили, резать ли
         self.launch(again)
         self.bot.send(chat_id, f"🔁 Повторяю сборку «{book.name}» — о ходе напишу.")
 
@@ -1075,11 +1222,71 @@ class App:
         except Exception as exc:
             self.bot.send(chat_id, f"Не смог создать задание: {exc}")
             return
+        if self.ask_split(job, book):
+            return
         self.bot.send(chat_id, f"📖 Принял «{name}» ({book.stat().st_size / 1e6:.1f} МБ).\n"
                                "Запускаю сборку в фоне — о стадиях напишу сам.")
         self.launch(job)
 
+    def ask_split(self, job, book: pathlib.Path) -> bool:
+        """Длинная книга при включённом режиме частей: спрашиваем, резать ли её.
+
+        Режим частей включается в админке; порог — там же. Книга длиннее порога ждёт ответа и
+        машину не занимает: «да» — режем и идём по частям, «нет» — одним файлом, одним прогоном.
+        Возвращает True, если вопрос задан (запуск — после ответа).
+        """
+        if self.settings.mode != bot_settings.MODE_PARTS:
+            return False
+        hours = chains.estimate_hours(book)
+        limit = self.settings.parts_hours
+        if hours <= limit:
+            return False
+        count = max(2, int(-(-hours // limit)))
+        job.meta.update({"status": "choice", "hours_estimate": round(hours, 2),
+                         "note": "ждёт ответа: резать на части или одним файлом"})
+        job.save()
+        job.log_line(f"книга длинная (≈{hours:.1f} ч звука, порог {limit:g} ч) — спрашиваю, резать ли")
+        self.send_to_job_chat(
+            job,
+            f"📚 «{job.meta['name']}» длинная: ≈{hours:.1f} ч звука (порог {limit:g} ч).\n\n"
+            f"Резать на части по {limit:g} ч? Получится ≈{count} частей: они озвучатся по одной, "
+            f"каждая придёт архивом, а книга целиком соберётся в конце — здесь, без облака.\n\n"
+            f"Если не резать — книга пойдёт одним файлом, одним прогоном машины (на длинной книге "
+            f"прогон может не дойти до конца).",
+            buttons=[[("✂️ Да, резать", f"cut:{job.id}"), ("📄 Нет, одним файлом", f"whole:{job.id}")]])
+        return True
+
+    def choose_split(self, job_id: str, cut: bool) -> str:
+        """Ответ на «резать ли»: из Telegram и со страницы — одно место."""
+        job = self.jobs.by_id(job_id)
+        if job is None:
+            return "Такого задания уже нет — пришлите книгу заново."
+        if job.status != "choice":
+            decided = {"parts": "резать на части", "whole": "одним файлом"}.get(job.meta.get("split"), "")
+            return (f"«{job.meta['name']}»: уже решено" + (f" — {decided}." if decided else ".")
+                    + " Ход сборки — «Статус».")
+        job.meta.update({"split": "parts" if cut else "whole", "status": "queued", "note": ""})
+        job.save()
+        job.log_line("решение: " + ("резать на части" if cut else "одним файлом, без нарезки"))
+        self.launch(job)
+        if cut:
+            return (f"✂️ «{job.meta['name']}»: режу на части по {self.settings.parts_hours:g} ч — "
+                    f"о каждой части напишу.")
+        return f"📄 «{job.meta['name']}»: собираю одним файлом, без нарезки — о стадиях напишу."
+
     def launch(self, job) -> None:
+        """Запуск задания. Одно задание запускают двое — очередь бота и страница (или кнопка):
+        без блокировки оба успевали увидеть «в очереди» и, например, дважды резали книгу —
+        с двумя цепочками на одного родителя. Запуск — под общей блокировкой и по статусу с
+        диска: уже запущенное задание второй раз не запускается.
+        """
+        with LAUNCH_LOCK:
+            fresh = self.jobs.by_id(job.id)
+            if fresh is not None and fresh.status != "queued":
+                return
+            self._launch(fresh or job)
+
+    def _launch(self, job) -> None:
         book = pathlib.Path(job.meta.get("book") or "")
         if not book.is_file():
             job.meta.update({"status": "failed", "note": "файл книги пропал"})
@@ -1106,7 +1313,14 @@ class App:
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
                                        "--parts-dir", str(self.parts_dir(chain))])
                 return
-            if self.settings.mode == bot_settings.MODE_PARTS and not job.meta.get("part_index"):
+            split = job.meta.get("split")
+            if split == "whole":
+                # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
+                job.log_line("режим: одна книга целиком — так решили на вопрос «резать ли»")
+                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0)
+                return
+            if (split == "parts" or self.settings.mode == bot_settings.MODE_PARTS) \
+                    and not job.meta.get("part_index"):
                 self.start_chain(job, book)
                 return
             job.log_line(self.settings.job_line())
@@ -1126,6 +1340,9 @@ class App:
                   f"нет ни чата задания, ни владельца", flush=True)
             return
         minutes = ((job.meta.get("finished") or time.time()) - (job.meta.get("started") or time.time())) / 60
+        if job.meta.get("chain") and (job.meta.get("part_index") or job.meta.get("glue")):
+            self.report_chain_member(job, chat_id, minutes)
+            return
         if job.status == "done":
             result = job.meta.get("result") or ""
             local = pathlib.Path(result)
@@ -1156,6 +1373,36 @@ class App:
                                    f"{job.meta.get('note') or 'Причина неизвестна — смотрите журнал.'}\n\n"
                                    f"Повторить: /repeat {job.meta['session']} · журнал: "
                                    f"/log {job.meta['session']}", buttons=failed_menu(job.meta["session"]))
+
+
+    def report_chain_member(self, job, chat_id, minutes: float) -> None:
+        """Итог части книги или сборки книги: свои слова, без «ссылок на Drive» и кнопок книги.
+
+        Готовая часть — сообщение «часть k из N готова» с архивом и тем, что дальше. Упавшую часть
+        повторяет или останавливает проход по цепочкам — он и пишет (с кнопкой «повторить»);
+        общий отчёт «не собралась» тут сбивал бы с толку: часть, может быть, уже повторяется.
+        Сборку книги целиком сообщает finish_chain.
+        """
+        if job.meta.get("glue") or job.status != "done":
+            return
+        chain = self.chains.by_id(job.meta.get("chain") or "")
+        total = (chain.meta.get("total") if chain else None) or job.meta.get("parts_total") or "?"
+        index = job.meta.get("part_index")
+        result = pathlib.Path(job.meta.get("result") or "")
+        try:                                       # архив части — в результаты, как у обычной книги
+            if result.name and result.is_file() and result != self.jobs.results / result.name:
+                shutil.copyfile(result, self.jobs.results / result.name)
+        except OSError:
+            pass
+        following = None
+        if chain is not None:
+            following = next((part for part in chain.parts if part.get("index", 0) > int(index)
+                              and part.get("status") != chains.PART_DONE), None)
+        then = (f"Дальше — часть {following['index']}, она уже в очереди." if following
+                else "Это последняя часть: дальше склейка и сборка всей книги здесь, в контейнере.")
+        self.bot.send(chat_id, f"✅ «{chain.meta.get('name') if chain else job.meta['name']}»: часть {index} "
+                               f"из {total} готова за {minutes:.0f} мин.\n"
+                               f"Архив части: {self.jobs.results / result.name if result.name else 'в томе'}\n{then}")
 
 
 def main() -> int:
@@ -1193,7 +1440,9 @@ def main() -> int:
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
                           stop=app.stop_for_web, login=app.colab, notify=app.notify_owner,
                           settings=app.settings, chains=app.chains,
-                          continue_chain=app.continue_chain, glue=app.glue_chain)
+                          continue_chain=app.continue_chain, glue=app.glue_chain,
+                          ask_split=app.ask_split, choose_split=app.choose_split,
+                          retry_part=app.retry_part)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "
