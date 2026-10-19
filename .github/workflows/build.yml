@@ -3,7 +3,7 @@ name: build image
 # Сборка и публикация образа в GitHub Container Registry. Никаких сборок на машине.
 on:
   push:
-    branches: [main, parts-mode]
+    branches: [main]
     paths-ignore: ["README.md", "LICENSE"]
   workflow_dispatch:
   # Ручной/автоматический пересбор из davnozdu/qwen-epub-audiobook
@@ -13,12 +13,9 @@ on:
 
 env:
   IMAGE: ghcr.io/${{ github.repository }}
-  # Конвейер берём клоном, чтобы не держать две копии. В тестовой ветке — из такой же тестовой
-  # ветки конвейера: правки проверяем до того, как они попадут в main.
-  PIPELINE_REF: ${{ github.ref_name == 'main' && 'main' || 'parts-mode' }}
-  # main публикует :latest — именно его тянет рабочий контейнер. Тестовая ветка публикует только
-  # :test, поэтому рабочий образ от её сборок не меняется.
-  IMAGE_TAG: ${{ github.ref_name == 'main' && 'latest' || 'test' }}
+  # Одна ветка: конвейер — из main конвейера, образ — :latest (его тянет рабочий контейнер).
+  PIPELINE_REF: main
+  IMAGE_TAG: latest
 
 jobs:
   build:
