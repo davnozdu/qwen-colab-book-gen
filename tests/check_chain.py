@@ -85,6 +85,15 @@ def wait_jobs(predicate, seconds: int, what: str):
     return jobs()
 
 
+def on_host(path: str) -> pathlib.Path:
+    """Путь из бота — на этой стороне. В контейнере том смонтирован в /data, а проверка идёт снаружи,
+    где тот же том лежит в <каталог состояния>/data; локально путь уже «наш»."""
+    candidate = pathlib.Path(path)
+    if not candidate.exists() and str(candidate).startswith("/data/"):
+        return pathlib.Path(STATE, "data", str(candidate)[len("/data/"):])
+    return candidate
+
+
 books = sorted(pathlib.Path(STATE, "data", "books").glob("*.epub"))
 book = next((item for item in books if "limit" not in item.name.lower()), None)
 if book is None:
@@ -137,7 +146,7 @@ check("сборке отдали каталог с частями в томе и
               for index in (1, 2)),
       f"частей-заданий {len(finished)}: " + str([(job['name'], job['status']) for job in finished]) + " | " + glue_log[-200:])
 check("архив собранной книги лежит в результатах и бот на него ссылается",
-      bool(gluers) and all(job.get("result") and pathlib.Path(job["result"]).is_file() for job in gluers),
+      bool(gluers) and all(job.get("result") and on_host(job["result"]).is_file() for job in gluers),
       str([(job.get("result"), job.get("note")) for job in gluers]))
 check("в карточке части показаны как готовые",
       "готово" in done_card.split("Готовые архивы")[0]
