@@ -280,6 +280,20 @@ check("порог 0 — сторож выключен", again.id not in stopped)
 check("неверный порог админка не принимает",
       "не изменены" in app.settings.update({"mode": "parts", "parts_hours": "0.5", "stall_minutes": "2"}))
 
+# ── 8. местная сборка книги жива, даже когда в образе есть tmux ─────────────
+import subprocess as _sp
+real = Jobs(work / "local-data", HERE / "pipeline", max_jobs=1, env=dict(os.environ))
+real.has_tmux = True                                   # как в контейнере
+local_job = real.add("сборка книги", CHAT, short_book)
+script = work / "slow.py"
+script.write_text("import time; time.sleep(3)", encoding="utf-8")
+real.start_local(local_job, script, [])
+check("местная сборка книги считается живой и при tmux в образе", real.alive(real.by_id(local_job.id)))
+real.refresh()
+check("и не падает с «архива нет», пока идёт", real.by_id(local_job.id).status == "running")
+__import__("time").sleep(4)
+check("а когда процесс закончился — завершается", not real.alive(real.by_id(local_job.id)))
+
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
 sys.exit(1 if bad else 0)

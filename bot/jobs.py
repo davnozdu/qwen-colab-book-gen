@@ -466,7 +466,10 @@ class Jobs:
         return None
 
     def alive(self, job: Job) -> bool:
-        if self.has_tmux:
+        # Сборка книги из частей — местный процесс (start_local), не tmux-сессия. В контейнере tmux
+        # есть, и проверка по сессии считала такую сборку мёртвой сразу после запуска: задание
+        # падало с «архива нет», хотя сборка шла и архив появлялся через минуту.
+        if self.has_tmux and not job.meta.get("local"):
             done = subprocess.run(["tmux", "has-session", "-t", job.meta["session"]],
                                   capture_output=True, env=self.env)
             return done.returncode == 0
