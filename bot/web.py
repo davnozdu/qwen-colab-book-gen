@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import settings as bot_settings
 
-PER_PAGE = 20
+PER_PAGE = 10                      # строк на страницу во всех списках
 MAX_UPLOAD = 200 * 1024 * 1024        # потолок книги со страницы: том не должен умереть от одного файла
 
 # Части книги на странице: тот же набор значков, что в боте, чтобы не искать смысл в словах.
@@ -42,6 +42,9 @@ STYLE = """
  body { font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
         background: #14161a; color: #e8e8e8; }
  main { max-width: 980px; margin: 0 auto; }
+ input.search { box-sizing: border-box; background: #0f1114; color: #e8e8e8; border: 1px solid #3a3f47;
+                border-radius: 6px; padding: 7px 10px; font: inherit; }
+ input.search:focus { outline: none; border-color: #6b8afd; }
  h1 { font-size: 20px; margin: 0 0 4px; }
  h2 { font-size: 16px; margin: 0 0 10px; }
  .muted { color: #9aa0a6; }
@@ -70,13 +73,42 @@ STYLE = """
 """
 
 SCRIPT = """
-// Обновляем страницу, чтобы видеть ход сборки, но не мешаем вводить код авторизации
-// и не перезагружаем живой журнал: у него своя подгрузка, а перезагрузка сбрасывала
-// прокрутку наверх — пользователь видел начало журнала вместо последних событий.
-setTimeout(function () {
+// Обновляем страницу, чтобы видеть ход сборки, но не мешаем вводить код авторизации, не
+// перезагружаем живой журнал (у него своя подгрузка) и не сбиваем поиск, пока его набирают.
+let typedAt = 0;
+setInterval(function () {
   const busy = document.querySelector('input[name=code]') || document.getElementById('log');
-  if (!busy) { location.reload(); }
+  const active = document.activeElement;
+  const typing = (active && active.classList && active.classList.contains('search'))
+                 || Date.now() - typedAt < 10000;
+  if (!busy && !typing) { location.reload(); }
 }, 5000);
+// Поиск без Enter: через четверть секунды после последней буквы запрашиваем только таблицу
+// списка и подменяем её — поле ввода остаётся тем же, курсор и фокус не прыгают. Запрос кладём
+// в адрес страницы: автообновление и ссылки на страницы списка его сохраняют.
+document.addEventListener('input', function (event) {
+  const box = event.target;
+  if (!box.classList || !box.classList.contains('search')) { return; }
+  typedAt = Date.now();
+  clearTimeout(box.pending);
+  box.pending = setTimeout(function () {
+    const url = new URL(location.href);
+    if (box.value.trim()) { url.searchParams.set(box.name, box.value.trim()); }
+    else { url.searchParams.delete(box.name); }
+    url.searchParams.delete(box.dataset.page);
+    url.searchParams.delete('msg');
+    history.replaceState(null, '', url);
+    const query = new URLSearchParams(url.search);
+    query.set('base', location.pathname);
+    fetch('/fragment/' + box.dataset.list + '?' + query.toString())
+      .then(function (answer) { return answer.text(); })
+      .then(function (text) {
+        const fresh = new DOMParser().parseFromString(text, 'text/html').querySelector('.list-body');
+        const card = document.getElementById('list-' + box.dataset.list);
+        if (fresh && card) { card.querySelector('.list-body').replaceWith(fresh); }
+      });
+  }, 250);
+});
 """
 
 
@@ -182,6 +214,7 @@ class WebApp:
         parsed = urllib.parse.urlparse(path)
         query = query or urllib.parse.parse_qs(parsed.query)
         page = _int(query.get("page", ["1"])[0], 1)
+        self.query = query
         message = query.get("msg", [""])[0]
         if message:
             self.last_message = message
@@ -190,9 +223,19 @@ class WebApp:
         if method == "GET" and where == "/":
             return self.html(self.shell(self.jobs_page(page)))
         if method == "GET" and where == "/files":
-            return self.html(self.shell(self.files_page(page, "books")))
+            return self.html(self.shell(self.files_card("books", "/files")))
         if method == "GET" and where == "/results":
-            return self.html(self.shell(self.files_page(page, "results")))
+            return self.html(self.shell(self.files_card("results", "/results")))
+        if method == "GET" and parsed.path.startswith("/fragment/"):
+            # Только таблица списка — для поиска на лету (страницу целиком не перерисовываем).
+            kind = path_las(parsed.path)
+            base = (query.get("base") or ["/"])[0]
+            base = base if base in ("/", "/files", "/results") else "/"
+            if kind == "jobs":
+                return self.html(self.jobs_card())
+            if kind in ("books", "results"):
+                return self.html(self.files_card(kind, base))
+            return 404, "text/plain; charset=utf-8", "нет такого списка".encode(), {}
         if method == "GET" and where == "/api/jobs":
             payload = [{"id": job.id, "session": job.meta["session"], "name": job.meta["name"],
                         "status": job.status, "result": job.meta.get("result", ""),
@@ -234,6 +277,12 @@ class WebApp:
 
         if method == "POST" and where == "/upload":
             return self.upload(content_type, body)
+        if method == "POST" and parsed.path.startswith(("/book/delete/", "/result/delete/")):
+            kind = "books" if parsed.path.startswith("/book/") else "results"
+            message = self.delete_file(kind, path_las(parsed.path))
+            self.notify("Со страницы: " + message)
+            back = (query.get("back") or ["/"])[0]
+            return self.redirect(back if back in ("/", "/files", "/results") else "/", message)
         if method == "POST" and parsed.path.startswith("/run/"):
             return self.run_existing(path_las(parsed.path))
         if method == "POST" and parsed.path.startswith("/repeat/"):
@@ -373,22 +422,40 @@ class WebApp:
 </form>
 <div class="muted" style="margin-top:8px">Только EPUB. {self.mode_hint()} Одна книга за раз.</div>{hint}</div>"""
 
+        return upload + self.chains_card() + self.settings_card() + self.colab_card() \
+            + self.jobs_card() + self.files_card("books", "/") + self.files_card("results", "/")
+
+    def param(self, name: str) -> str:
+        return ((getattr(self, "query", None) or {}).get(name) or [""])[0].strip()
+
+    def jobs_card(self) -> str:
+        """Сборки: по 10 на страницу и поиск по названию на лету."""
+        search = self.param("q")
+        jobs = [job for job in self.jobs.load() if matches(job.meta.get("name") or "", search)]
+        page = clamp_page(_int(self.param("page") or "1", 1), len(jobs))
         rows = [self.job_row(job) for job in page_slice(jobs, page)]
         if not rows:
-            rows = ['<tr><td colspan="3" class="muted">Пока ничего не собиралось.</td></tr>']
+            rows = [f'<tr><td colspan="3" class="muted">'
+                    f'{"Ничего не нашлось." if search else "Пока ничего не собиралось."}</td></tr>']
         stop_all = ""
-        if busy:
+        if self.jobs.live_running():
             stop_all = ('<form class="inline" method="post" action="/stop" '
                         "onsubmit=\"return confirm('Остановить все сборки и освободить машины?')\""
                         '><button class="ghost" type="submit">остановить всё</button></form>')
-        table = (f'<div class="card"><h2>Сборки {stop_all}</h2><table>'
-                 '<tr><th>Книга</th><th>Состояние</th><th>Действия</th></tr>'
-                 + "\n".join(rows) + "</table>"
-                 + pager(page, len(jobs), "/") + "</div>")
+        return (f'<div class="card" id="list-jobs"><h2>Сборки {stop_all}</h2>'
+                + search_box("jobs", "q", "page", search, "поиск по названию книги")
+                + '<div class="list-body"><table>'
+                '<tr><th>Книга</th><th>Состояние</th><th>Действия</th></tr>'
+                + "\n".join(rows) + "</table>"
+                + pager(page, len(jobs), "/", "page", self.query_rest("page")) + "</div></div>")
 
-        return upload + self.chains_card() + self.settings_card() + self.colab_card() + table \
-            + self.files_card("/files", "Книги в папке", "books") \
-            + self.files_card("/results", "Готовые архивы", "results")
+    def query_rest(self, *drop) -> dict:
+        """Остальные параметры адреса — чтобы листание одного списка не сбрасывало другие."""
+        keep = {}
+        for name, values in (getattr(self, "query", None) or {}).items():
+            if name not in drop and name not in ("msg", "base") and values and values[0]:
+                keep[name] = values[0]
+        return keep
 
     def chains_card(self) -> str:
         """Книги, разрезанные на части: что готово, что идёт, что упало — и кнопка «продолжить»."""
@@ -682,56 +749,78 @@ class WebApp:
                 f'setTimeout(pull, 1000);'
                 f'</script>')
 
-    def files_card(self, base: str, title: str, kind: str) -> str:
+    def files_card(self, kind: str, base: str) -> str:
+        """Книги или архивы: по 10 на страницу, поиск на лету, скачать, запустить, удалить."""
         folder = self.jobs.books if kind == "books" else self.jobs.results
-        files = list_files(folder)
-        rows = []
-        for path in files[:PER_PAGE]:
-            route = "/file/" if kind == "books" else "/result/"
-            changed = time.strftime("%d.%m %H:%M", time.localtime(path.stat().st_mtime))
-            action = ""
-            if kind == "books":
-                action = (f'<form class="inline" method="post" action="/run/'
-                          f'{urllib.parse.quote(path.name)}">'
-                          f'<button class="ghost" type="submit">запустить</button></form>')
-            rows.append(f'<tr><td><a href="{route}{urllib.parse.quote(path.name)}">'
-                        f'{html.escape(path.name)}</a></td>'
-                        f'<td class="muted">{human_size(path.stat().st_size)}</td>'
-                        f'<td class="muted">{changed}</td><td>{action}</td></tr>')
-        if not rows:
-            rows = ['<tr><td colspan="4" class="muted">Папка пуста.</td></tr>']
-        more = ""
-        if len(files) > PER_PAGE:
-            more = f'<div class="muted" style="margin-top:8px">показаны первые {PER_PAGE} из ' \
-                   f'{len(files)} — остальные в <a href="{base}">полном списке</a></div>'
-        return (f'<div class="card"><h2>{title}</h2><table>'
-                f'<tr><th>Файл</th><th>Размер</th><th>Изменён</th><th></th></tr>'
-                + "\n".join(rows) + f'</table>{more}</div>')
-
-    def files_page(self, page: int, kind: str) -> str:
-        folder = self.jobs.books if kind == "books" else self.jobs.results
-        title = "Книги в папке books" if kind == "books" else "Готовые архивы в папке results"
+        title = "Книги в папке" if kind == "books" else "Готовые архивы"
         route = "/file/" if kind == "books" else "/result/"
-        base = "/files" if kind == "books" else "/results"
-        files = list_files(folder)
+        key, page_key = ("bq", "bpage") if kind == "books" else ("rq", "rpage")
+        search = self.param(key)
+        files = [path for path in list_files(folder) if matches(path.name, search)]
+        page = clamp_page(_int(self.param(page_key) or "1", 1), len(files))
+        busy = self.books_in_use() if kind == "books" else set()
         rows = []
         for path in page_slice(files, page):
-            changed = time.strftime("%d.%m %H:%M", time.localtime(path.stat().st_mtime))
-            action = ""
+            try:
+                stat = path.stat()
+            except OSError:                       # файл удалили прямо сейчас
+                continue
+            changed = time.strftime("%d.%m %H:%M", time.localtime(stat.st_mtime))
+            name = urllib.parse.quote(path.name)
+            actions = []
             if kind == "books":
-                action = (f'<form class="inline" method="post" action="/run/'
-                          f'{urllib.parse.quote(path.name)}">'
-                          f'<button class="ghost" type="submit">запустить</button></form>')
-            rows.append(f'<tr><td><a href="{route}{urllib.parse.quote(path.name)}">'
-                        f'{html.escape(path.name)}</a></td>'
-                        f'<td class="muted">{human_size(path.stat().st_size)}</td>'
-                        f'<td class="muted">{changed}</td><td>{action}</td></tr>')
+                actions.append(f'<form class="inline" method="post" action="/run/{name}">'
+                               f'<button class="ghost" type="submit">запустить</button></form>')
+            what = "книгу" if kind == "books" else "архив"
+            if path.name in busy:
+                actions.append('<span class="muted" title="Книга сейчас в работе">в работе</span>')
+            else:
+                delete = ("/book/delete/" if kind == "books" else "/result/delete/") + name
+                actions.append(f'<form class="inline" method="post" action="{delete}?back={base}" '
+                               f'onsubmit="return confirm(\'Удалить {what} «{html.escape(path.name)}»? '
+                               f'Это нельзя отменить.\')"><button class="ghost" type="submit">'
+                               f'удалить</button></form>')
+            rows.append(f'<tr><td><a href="{route}{name}">{html.escape(path.name)}</a></td>'
+                        f'<td class="muted">{human_size(stat.st_size)}</td>'
+                        f'<td class="muted">{changed}</td><td>{" ".join(actions)}</td></tr>')
         if not rows:
-            rows = ['<tr><td colspan="4" class="muted">Папка пуста.</td></tr>']
-        return (f'<div class="card"><h2>{title}</h2>'
-                f'<div class="muted">Всего файлов: {len(files)}. Клик по имени — скачивание.</div>'
-                f'<table><tr><th>Файл</th><th>Размер</th><th>Изменён</th></tr>'
-                + "\n".join(rows) + "</table>" + pager(page, len(files), base) + "</div>")
+            rows = [f'<tr><td colspan="4" class="muted">'
+                    f'{"Ничего не нашлось." if search else "Папка пуста."}</td></tr>']
+        hint = "поиск по названию книги" if kind == "books" else "поиск по названию архива"
+        return (f'<div class="card" id="list-{kind}"><h2>{title}</h2>'
+                + search_box(kind, key, page_key, search, hint)
+                + '<div class="list-body"><table>'
+                f'<tr><th>Файл</th><th>Размер</th><th>Изменён</th><th></th></tr>'
+                + "\n".join(rows) + "</table>"
+                + pager(page, len(files), base, page_key, self.query_rest(page_key)) + "</div></div>")
+
+    def books_in_use(self) -> set:
+        """Книги, которые сейчас нельзя удалять: их собирают, режут, ждут или ждут ответа."""
+        names = set()
+        for job in self.jobs.load():
+            if job.status in ("running", "queued", "choice", "splitting", "waiting", "gluing", "held"):
+                names.add(pathlib.Path(job.meta.get("book") or "").name)
+        if self.chains is not None:
+            for chain in self.chains.load():
+                if chain.status not in ("done", "stopped"):
+                    names.add(pathlib.Path(chain.meta.get("book") or "").name)
+        names.discard("")
+        return names
+
+    def delete_file(self, kind: str, name: str) -> str:
+        """Удалить книгу из папки или архив из результатов. Задания и журналы остаются."""
+        folder = self.jobs.books if kind == "books" else self.jobs.results
+        target = (folder / safe_name(name)).resolve()
+        if target.parent != folder.resolve() or not target.is_file():
+            return f"Файла «{safe_name(name)}» уже нет."
+        if kind == "books" and target.name in self.books_in_use():
+            return f"«{target.name}» сейчас в работе — сначала остановите сборку, потом удаляйте."
+        try:
+            target.unlink()
+        except OSError as exc:
+            return f"Удалить «{target.name}» не вышло: {exc}"
+        what = "Книга" if kind == "books" else "Архив"
+        return f"{what} «{target.name}» удалена." if kind == "books" else f"{what} «{target.name}» удалён."
 
     # ────────────────────────────── файлы и действия ──────────────────────────────
     def send_file(self, folder: pathlib.Path, name: str, kind: str) -> tuple:
@@ -818,17 +907,41 @@ def page_slice(items: list, page: int) -> list:
     return items[(page - 1) * PER_PAGE: page * PER_PAGE]
 
 
-def pager(page: int, total: int, base: str) -> str:
+def matches(text: str, search: str) -> bool:
+    """Поиск без учёта регистра и «ё/е»: «Ёлка» находится и по «елка»."""
+    if not search:
+        return True
+    fold = lambda value: value.casefold().replace("ё", "е")
+    return all(word in fold(text) for word in fold(search).split())
+
+
+def clamp_page(page: int, total: int) -> int:
+    """Номер страницы в пределах списка: после поиска или удаления «страница 5 из 2» не нужна."""
+    pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
+    return min(max(1, page), pages)
+
+
+def search_box(kind: str, key: str, page_key: str, value: str, hint: str) -> str:
+    return (f'<input type="search" class="search" name="{key}" data-list="{kind}" '
+            f'data-page="{page_key}" value="{html.escape(value)}" placeholder="{hint}" '
+            f'autocomplete="off" style="width:100%;margin:4px 0 8px">')
+
+
+def pager(page: int, total: int, base: str, key: str = "page", params: dict | None = None) -> str:
     pages = max(1, (total + PER_PAGE - 1) // PER_PAGE)
     if pages == 1:
         return f'<div class="pager muted">всего записей: {total}</div>'
+
+    def link(number: int) -> str:
+        return base + "?" + urllib.parse.urlencode(dict(params or {}, **{key: number}))
+
     parts = []
     if page > 1:
-        parts.append(f'<a href="{base}?page={page - 1}">← новее</a>')
+        parts.append(f'<a href="{html.escape(link(page - 1))}">← новее</a>')
     parts.append(f"<span>страница {page} из {pages}</span>")
     if page < pages:
-        parts.append(f'<a href="{base}?page={page + 1}">старее →</a>')
-    return f'<div class="pager">{"".join(parts)} · всего записей: {total} (по {PER_PAGE} на страницу)</div>'
+        parts.append(f'<a href="{html.escape(link(page + 1))}">старее →</a>')
+    return f'<div class="pager">{" ".join(parts)} · всего записей: {total} (по {PER_PAGE} на страницу)</div>'
 
 
 def _int(value: str, default: int) -> int:

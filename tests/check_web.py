@@ -73,12 +73,12 @@ code, listing = get("/files")
 check("каталог книг открывается", code == 200 and b"probe-" in listing, f"код {code}")
 check("в каталоге видно размер файла", code == 200 and "Б".encode() in listing)
 rows = listing.count(b'/file/')                 # все файлы на странице, не только тестовые
-check("каталог показывает не больше 20 записей", rows == 20, f"строк: {rows}")
+check("каталог показывает по 10 записей на страницу", rows == 10, f"строк: {rows}")
 
-code, listing2 = get("/files?page=2")
-check("вторая страница каталога есть", code == 200 and "страница 2 из 2".encode() in listing2)
+code, listing2 = get("/files?bpage=2")
+check("вторая страница каталога есть", code == 200 and "страница 2 из".encode() in listing2)
 check("пагинация ведёт на /files, а не в никуда (/books)",
-      b"/files?page=1" in listing2 and b"/books?page=" not in listing2)
+      b"/files?bpage=1" in listing2 and b"/books?" not in listing2)
 
 code, file_body = get("/file/probe-00.epub")
 check("клик по книге скачивает её", code == 200 and file_body.startswith(b"probe"))
