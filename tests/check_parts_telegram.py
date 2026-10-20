@@ -79,7 +79,7 @@ app.in_background = lambda chat_id, task, title: (lambda answer: answer and app.
 started = []
 
 
-def fake_start(job, book, gpu="T4", drive_dir="", max_hours=7.0, extra=None):
+def fake_start(job, book, gpu="T4", drive_dir="", max_hours=7.0, extra=None, secrets=None):
     """Вместо машины: запоминаем, ЧТО запустили бы, и ставим задание «в работу»."""
     started.append({"job": job.id, "book": str(book), "max_hours": max_hours, "extra": extra or []})
     job.meta["status"] = "running"
