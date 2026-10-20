@@ -146,6 +146,7 @@ check("пакет пришёл — книга снова в очереди с п
 check("в Telegram — состав героев, без аудио-образцов",
       said(app.bot.sent, "голоса готовы", "Петя", "реплик 12") and not app.bot.audio, str(app.bot.sent))
 app.launch(job)
+check("и с ключом LLM — для прочтения иностранных вставок", started[-1]["secrets"].get("LLM_API_KEY") == "ollama-secret-1234")
 check("озвучка идёт с --voice-pack", started[-1]["job"] == job.id and started[-1]["extra"][-2:] == ["--voice-pack", str(pack_zip)])
 
 # ── 4. повтор и части — готовый пакет ───────────────────────────────────────

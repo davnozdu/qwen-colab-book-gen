@@ -890,6 +890,13 @@ class App:
             self.bot.send(chat_id, f"📚 «{job.meta['name']}» · {job.status}" + (f"\n{where}" if where else "")
                           + ("\n🎭 голоса книги готовы" if pack else ""), buttons=rows)
 
+    def llm_secrets(self):
+        """Ключ LLM для машины: разметка ролей и прочтение иностранных вставок. Нет ключа — None."""
+        if not self.settings.llm_key:
+            return None
+        return {"LLM_PROVIDER": self.settings.llm_provider, "LLM_MODEL": self.settings.llm_model,
+                "LLM_API_KEY": self.settings.llm_key}
+
     def start_cast(self, job, book: pathlib.Path) -> None:
         """Первая машина: ключ LLM — заданию через окружение, не в командную строку."""
         folder = pathlib.Path(job.meta.get("pack_dir") or self.voice_packs.folder(book))
@@ -897,8 +904,7 @@ class App:
         self.announce_profile(job)
         self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0,
                         extra=["--cast", "--out-dir", str(folder)],
-                        secrets={"LLM_PROVIDER": self.settings.llm_provider,
-                                 "LLM_MODEL": self.settings.llm_model, "LLM_API_KEY": self.settings.llm_key})
+                        secrets=self.llm_secrets())
 
     @staticmethod
     def llm_failure(job) -> str:
@@ -2067,7 +2073,8 @@ class App:
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
                                        "--parts-dir", str(self.parts_dir(chain))]
-                                + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else []))
+                                + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else []),
+                                secrets=self.llm_secrets())
                 return
             pack = self.voice_pack_for(job, book)
             if pack is self.WAITING:
@@ -2078,7 +2085,8 @@ class App:
                 # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
                 job.log_line("режим: одна книга целиком — так решили на вопрос «резать ли»")
                 self.announce_profile(job)
-                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0, extra=voices_extra)
+                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0, extra=voices_extra,
+                                secrets=self.llm_secrets())
                 return
             if (split == "parts" or self.settings.mode == bot_settings.MODE_PARTS) \
                     and not job.meta.get("part_index"):
@@ -2086,7 +2094,8 @@ class App:
                 return
             job.log_line(self.settings.job_line())
             self.announce_profile(job)
-            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS, extra=voices_extra)
+            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS, extra=voices_extra,
+                            secrets=self.llm_secrets())
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
             job.save()
