@@ -433,9 +433,21 @@ class App:
                 and not self.machine_busy():
             self.profiles.fit_count()            # число профилей уменьшили на странице
         self.chains_pass()
-        for job in reversed(self.jobs.load()):
-            if job.status == "queued" and self.jobs.free_slot():
+        for job in self.queue_order(self.jobs.load()):
+            if self.jobs.free_slot():
                 self.launch(job)
+
+    @staticmethod
+    def queue_order(jobs) -> list:
+        """Ждущие задания — от старых к новым, части одной книги — по номеру части.
+
+        Номер задания — секунда создания плюс случайный хвост, а части одной книги создаются в одну
+        секунду: по номеру очередь однажды запустила вторую часть раньше первой. Порядок даёт точное
+        время создания, а при совпадении — номер части.
+        """
+        queued = [job for job in jobs if job.status == "queued"]
+        return sorted(queued, key=lambda job: (float(job.meta.get("created") or 0),
+                                               int(job.meta.get("part_index") or 0), job.id))
 
     def housekeeping(self, force: bool = False) -> list:
         """Уборка томов раз в час: старые задания, книги по частям, сырьё, архивы, журналы CLI."""
@@ -950,7 +962,7 @@ class App:
                                    f"не останавливается.")
 
     def cast_ready(self, job, cast) -> None:
-        """Пакет пришёл: состав героев и образцы — в Telegram (и на страницу), книга — на озвучку."""
+        """Пакет пришёл: состав героев — в Telegram, образцы — на страницу, книга — на озвучку."""
         cast.meta["handled"] = True
         cast.save()
         try:
@@ -966,14 +978,8 @@ class App:
                  for v in heroes]
         self.send_to_job_chat(job, f"🎭 «{job.meta['name']}»: голоса готовы — героев {len(heroes)}, рассказчик "
                                    f"прежний.\n" + "\n".join(lines[:40])
-                                   + "\n\nОбразцы — ниже и на странице. Начинаю озвучку.")
-        chat = str(job.meta.get("chat_id") or "") if looks_like_chat_id(job.meta.get("chat_id")) else self.owner_chat()
-        sender = getattr(self.bot, "send_audio", None)
-        if chat and sender:
-            for voice in heroes[:15]:
-                if voice["sample"]:
-                    sender(chat, pathlib.Path(voice["sample"]), caption=f"{voice['name']}: «{voice['text'][:200]}»",
-                           title=voice["name"])
+                                   + "\n\nОбразцы голосов — на странице. Начинаю озвучку.")
+        # Сами образцы в Telegram не шлём: на книгу их до пятнадцати, а слушают их на странице.
 
     # ────────────────────────────── части книги ──────────────────────────────
     def start_chain(self, job, book: pathlib.Path) -> None:

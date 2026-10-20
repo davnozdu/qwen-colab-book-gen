@@ -3,7 +3,7 @@
 
   1. нет ключа LLM — книга озвучивается одним голосом, с пояснением;
   2. ключ есть — сначала задание «голоса» (первая машина), книга ждёт; ключ — не в командной строке;
-  3. пакет готов — состав героев и образцы в Telegram, книга идёт на озвучку с --voice-pack;
+  3. пакет готов — состав героев в Telegram (образцы только на странице), книга идёт на озвучку с --voice-pack;
   4. повтор той же книги и её части берут готовый пакет, машина на разметку не тратится;
   5. сбой LLM — один голос сразу; сбой машины Colab — повтор задания «голоса»;
   6. Telegram «🎭 Голоса»: вкл/выкл, поставщик, ключ (сообщение удаляется), модели;
@@ -143,9 +143,8 @@ app.bot.sent = []
 app.casting_pass()
 job = app.jobs.by_id(job.id)
 check("пакет пришёл — книга снова в очереди с пакетом", job.status == "queued" and job.meta.get("voice_pack") == str(pack_zip))
-check("в Telegram — состав героев и образцы аудио",
-      said(app.bot.sent, "голоса готовы", "Петя", "реплик 12") and app.bot.audio
-      and app.bot.audio[-1][0].endswith("petya.wav"), str(app.bot.sent))
+check("в Telegram — состав героев, без аудио-образцов",
+      said(app.bot.sent, "голоса готовы", "Петя", "реплик 12") and not app.bot.audio, str(app.bot.sent))
 app.launch(job)
 check("озвучка идёт с --voice-pack", started[-1]["job"] == job.id and started[-1]["extra"][-2:] == ["--voice-pack", str(pack_zip)])
 
@@ -380,6 +379,17 @@ os.utime(stale.path / "secrets.env", (old, old))
 housekeeping.sweep(work / "data", work / "nohome", app.jobs, app.chains, 30)
 check("уборка: сырьё заменённой нарезки удаляется сразу, забытый ключ — через час",
       not raw.exists() and not (stale.path / "secrets.env").exists())
+
+# Части одной книги создаются в одну секунду: номер задания у них различается только случайным
+# хвостом. Очередь всё равно берёт первую часть раньше второй.
+first, second = app.jobs.add("часть 1", CHAT, book), app.jobs.add("часть 2", CHAT, book)
+first.meta.update({"part_index": 1, "created": 1000.0}); first.save()
+second.meta.update({"part_index": 2, "created": 1000.0}); second.save()
+for item in (first, second):
+    item.path.rename(item.path.with_name("20260101-000000-" + ("ffff" if item is first else "0000")))
+order = [item.meta.get("part_index") for item in app.queue_order(app.jobs.load())
+         if item.meta.get("name", "").startswith("часть ")]
+check("очередь: первая часть раньше второй, даже если номер задания «моложе»", order == [1, 2], str(order))
 
 failed = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)}, не прошло: {len(failed)})")
