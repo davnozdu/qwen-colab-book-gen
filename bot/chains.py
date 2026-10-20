@@ -326,18 +326,9 @@ class Chains:
                 if str(pathlib.Path(chain.meta.get("book") or "").resolve()) == target]
 
     def active(self) -> list:
-        """Живые цепочки — по одной на книгу, самая новая. Старшие дубли той же книги (остались от
-        версий до REPLACED) не показываются и не двигаются."""
-        seen, result = set(), []
-        for chain in self.load():                 # load() — от новых к старым
-            if chain.status not in (SPLIT, RUNNING, GLUING, FAILED):
-                continue
-            book = str(pathlib.Path(chain.meta.get("book") or "").resolve())
-            if book in seen:
-                continue
-            seen.add(book)
-            result.append(chain)
-        return result
+        """Живые цепочки. Дубли одной книги сюда не попадают: новая нарезка помечает прежние
+        цепочки книги REPLACED (pick_for); на странице — по одной плашке на книгу (recent)."""
+        return [chain for chain in self.load() if chain.status in (SPLIT, RUNNING, GLUING, FAILED)]
 
     def recent(self, limit: int = 5) -> list:
         """Последние книги для страницы — по одной цепочке на книгу, самая новая, вместе с готовыми:

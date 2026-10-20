@@ -366,8 +366,7 @@ stale = app.chains.create(dup_book, "Дубль", CHAT, 0.5)          # стар
 stale.meta.update({"status": chains_mod.FAILED})
 stale.save()
 check("и дубли из прежних версий тоже не показываются: по одной плашке на книгу",
-      page.chains_card().count("Книга по частям: Дубль") == 1
-      and len([c for c in app.chains.active() if c.meta.get("name") == "Дубль"]) == 1)
+      page.chains_card().count("Книга по частям: Дубль") == 1)
 for number in range(6):
     other = app.chains.create(make_epub(work / f"other{number}.epub", 3000), f"Другая {number}", CHAT, 0.5)
     other.meta.update({"status": chains_mod.DONE})
