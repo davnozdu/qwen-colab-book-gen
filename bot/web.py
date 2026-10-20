@@ -184,7 +184,8 @@ class WebApp:
 
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
                  notify=None, settings=None, chains=None, continue_chain=None, glue=None,
-                 ask_split=None, choose_split=None, retry_part=None):
+                 ask_split=None, choose_split=None, retry_part=None, profiles=None,
+                 profile_action=None, resume=None, profile_label=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -205,6 +206,13 @@ class WebApp:
         self.choose_split = choose_split or (lambda job_id, cut: "Выбор недоступен в этой сборке.")
         # «Повторить» у части книги перезапускает её в своей цепочке, а не новой книгой.
         self.retry_part = retry_part or (lambda job_id: "Повтор части недоступен в этой сборке.")
+        # Профили Google Colab: список и состояние — объект Profiles, действия — те же, что у кнопок
+        # в Telegram (войти, выбрать, выйти, удалить, добавить, выйти из всех).
+        self.profiles = profiles
+        self.profile_action = profile_action or (lambda action, number=0: "Профили недоступны в этой сборке.")
+        self.profile_label = profile_label or (lambda number=0: "")
+        # «Продолжить» книгу на паузе: круг по профилям заново.
+        self.resume = resume or (lambda job_id: "Продолжение недоступно в этой сборке.")
         self.last_message = ""
 
     # ────────────────────────────── запросы ──────────────────────────────
@@ -342,6 +350,23 @@ class WebApp:
                 return self.redirect("/", "Код пустой — скопируйте его со страницы Google и вставьте сюда.")
             message = self.login_call("submit", code)
             self.notify("Код со страницы: " + message)
+            return self.redirect("/", message)
+        if method == "POST" and parsed.path.startswith("/profile/"):
+            # /profile/<действие>/<номер>: login, activate, logout, delete; add и logout_all — без номера
+            pieces = parsed.path.strip("/").split("/")
+            action = pieces[1] if len(pieces) > 1 else ""
+            number = int(pieces[2]) if len(pieces) > 2 and pieces[2].isdigit() else 0
+            if action not in ("login", "activate", "logout", "delete", "add", "logout_all"):
+                return self.redirect("/", "Неизвестное действие с профилем.")
+            try:
+                message = str(self.profile_action(action, number))
+            except Exception as exc:
+                message = f"Не вышло: {exc}"
+            self.notify(f"Профили со страницы: {message}")
+            return self.redirect("/", message)
+        if method == "POST" and parsed.path.startswith("/resume/"):
+            message = self.resume(path_las(parsed.path))
+            self.notify("Со страницы: " + message)
             return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
             return self.redirect("/", self.login_call("reset"))
@@ -547,6 +572,10 @@ class WebApp:
                 f'<input type="number" name="stall_minutes" step="5" min="0" max="600" '
                 f'value="{self.settings.stall_minutes}" style="width:5em"> мин '
                 f'<span class="muted">(журнал не растёт — машину гасим и пишем предупреждение; 0 — не следить)</span></div>'
+                f'<div style="margin-top:8px"><label>Профилей Google Colab</label> '
+                f'<input type="number" name="profiles" step="1" min="1" max="{bot_settings.PROFILES_MAX}" '
+                f'value="{self.settings.profiles}" style="width:4em"> '
+                f'<span class="muted">(аккаунты, между которыми бот переключается при сбоях)</span></div>'
                 f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
                 f'</form>'
                 f'<div class="muted" style="margin-top:8px">Сейчас: '
@@ -556,7 +585,8 @@ class WebApp:
     def job_row(self, job) -> str:
         meta = job.meta
         icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
-                 "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸"}
+                 "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸",
+                 "paused": "⏸"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
@@ -595,6 +625,14 @@ class WebApp:
                            f'времени до конца">сколько осталось</a>')
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
+        elif job.status == "paused":
+            # Пауза после круга по профилям (или ждёт входа в следующий профиль): «продолжить».
+            actions.append(f'<form class="inline" method="post" action="/resume/{job.meta["session"]}">'
+                           f'<button type="submit" title="Пройти по профилям Colab заново">'
+                           f'продолжить</button></form>')
+            actions.append(f'<form class="inline" method="post" action="/delete/{job.meta["session"]}" '
+                           f"onsubmit=\"return confirm('Убрать это задание из списка?')\""
+                           f'><button class="ghost" type="submit">удалить</button></form>')
         elif job.status == "choice":
             # Длинная книга ждёт решения — те же две кнопки, что в Telegram.
             for choice, label, hint in (("cut", "резать на части", "Части озвучатся по одной, книга "
@@ -659,7 +697,7 @@ class WebApp:
         extra_html = (f'<div class="muted" style="margin-top:8px">{html.escape(str(extra))}</div>'
                       if extra else "")
         return (f'<div class="card"><h2>Google Colab</h2>'
-                f'<div>Аккаунт: {badge}</div>'
+                f'<div>Аккаунт{html.escape(self.active_profile())}: {badge}</div>'
                 f'<div class="muted">Вход в Colab тот же, что и в Telegram: подтвердите доступ в '
                 f'браузере и пришлите код. «Сбросить вход» откладывает token.json и всё состояние '
                 f'CLI (сессии, настройки, журнал) — после него можно войти другим аккаунтом. '
@@ -667,7 +705,51 @@ class WebApp:
                 f'{code_form}'
                 f'<div style="margin-top:10px">{" ".join(buttons)}</div>'
                 f'{extra_html}'
+                f'{self.profiles_block()}'
                 f'</div>')
+
+    def active_profile(self) -> str:
+        if self.profiles is None or not getattr(self.profiles, "enabled", False):
+            return ""
+        try:
+            return " — " + str(self.profile_label(self.profiles.active()))
+        except Exception:
+            return ""
+
+    def profiles_block(self) -> str:
+        """Профили: у каждого «войти», «выбрать», «выйти», «удалить»; внизу «добавить» и «выйти из всех»."""
+        if self.profiles is None or not getattr(self.profiles, "enabled", False):
+            return ""
+        def button(action: str, number: int, label: str, ghost: bool = True, confirm: str = "") -> str:
+            path = f"/profile/{action}" + (f"/{number}" if number else "")
+            check = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
+            style = ' class="ghost"' if ghost else ""
+            return (f'<form class="inline" method="post" action="{path}"{check}>'
+                    f'<button{style} type="submit">{label}</button></form>')
+        rows = []
+        active = self.profiles.active()
+        for number in self.profiles.numbers():
+            email = self.profiles.account(number)
+            if self.profiles.signed_in(number):
+                state = '<span class="ok">вход есть</span>' + (f' · {html.escape(email)}' if email else "")
+            else:
+                state = '<span class="bad">входа нет</span>'
+            mark = "▶️ " if number == active else ""
+            actions = [button("login", number, "войти", ghost=False)]
+            if number != active:
+                actions.append(button("activate", number, "выбрать"))
+            actions.append(button("logout", number, "выйти"))
+            if self.profiles.count() > 1:
+                actions.append(button("delete", number, "удалить", confirm=f"Удалить профиль {number}?"))
+            rows.append(f'<tr><td class="name">{mark}Профиль {number}</td><td>{state}</td>'
+                        f'<td>{" ".join(actions)}</td></tr>')
+        return (f'<h2 style="margin-top:16px">Профили</h2>'
+                f'<div class="muted">У каждого профиля свой вход Google. Сборка падает дважды подряд — '
+                f'бот сам переходит на следующий профиль; прошёл все — ставит книгу на паузу. '
+                f'Профиль без входа: бот просит войти в него и продолжает сам.</div>'
+                f'<table>{"".join(rows)}</table>'
+                f'<div style="margin-top:8px">{button("add", 0, "добавить профиль")} '
+                f'{button("logout_all", 0, "выйти из всех профилей", confirm="Выйти из всех профилей?")}</div>')
 
     def eta_page(self, job) -> str:
         """«Сколько осталось» — та же кнопка, что в Telegram: проценты по сегментам и оценка."""

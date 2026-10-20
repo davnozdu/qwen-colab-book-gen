@@ -22,9 +22,10 @@ MODE_BOOK = "book"
 MODE_PARTS = "parts"
 MODES = {MODE_BOOK: "одна книга целиком, без нарезки",
          MODE_PARTS: "с разбивкой на части"}
-DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30}
+DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 HOURS_MIN, HOURS_MAX = 0.5, 12.0
+PROFILES_MAX = 10                   # аккаунтов Google Colab, между которыми бот переключается
 TRUTHY = {"1", "on", "true", "yes", "да", "вкл"}
 
 
@@ -59,6 +60,15 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"порог зависания — 0 (не следить) или от {STALL_MIN} до {STALL_MAX} мин")
     except (TypeError, ValueError):
         problems.append("порог зависания должен быть числом минут (например, 30)")
+    profiles = values.get("profiles", DEFAULTS["profiles"])
+    try:
+        count = int(float(str(profiles).replace(",", ".")))
+        if 1 <= count <= PROFILES_MAX:
+            clean["profiles"] = count
+        else:
+            problems.append(f"профилей Colab — от 1 до {PROFILES_MAX}")
+    except (TypeError, ValueError):
+        problems.append("число профилей Colab должно быть целым (например, 2)")
     drive = values.get("drive", DEFAULTS["drive"])
     clean["drive"] = drive if isinstance(drive, bool) else str(drive).strip().lower() in TRUTHY
     return clean, problems
@@ -110,13 +120,22 @@ class Settings:
     def stall_minutes(self) -> int:
         return int(self.values.get("stall_minutes", DEFAULTS["stall_minutes"]))
 
+    @property
+    def profiles(self) -> int:
+        return int(self.values.get("profiles", DEFAULTS["profiles"]))
+
+    def set_profiles(self, count: int) -> str:
+        """Число профилей из кнопок «добавить/удалить профиль» — остальные настройки не трогаем."""
+        return self.update(dict(self.values, profiles=count))
+
     def title(self) -> str:
         return MODES[self.mode]
 
     def summary(self) -> str:
         line = (f"режим «{self.title()}», части по {self.parts_hours:g} ч, "
                 f"Google Drive: {'да' if self.drive else 'нет'}, "
-                f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}")
+                f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}, "
+                f"профилей Colab: {self.profiles}")
         if self.mode == MODE_BOOK:
             line += " (в этом режиме нарезка не используется)"
         else:

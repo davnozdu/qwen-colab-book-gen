@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERE.parent / "bot"))
 
 import bot as botmod             # noqa: E402
 import chains as chains_mod      # noqa: E402
+import profiles as profiles_mod  # noqa: E402
 import settings as settings_mod  # noqa: E402
 import tgapi                     # noqa: E402
 import web as webmod             # noqa: E402
@@ -72,6 +73,8 @@ app.state = {"offset": 0, "owner": CHAT, "seen": []}
 app.menu_chats = set()
 app.settings = settings_mod.Settings(work / "data" / "settings.json")
 app.chains = chains_mod.Chains(work / "data")
+# Профили выключены (вход лежит не в …/colab-cli): после двух сбоев круг профилей сразу пройден.
+app.profiles = profiles_mod.Profiles(work / "colab-config", count=lambda: app.settings.profiles)
 app.in_background = lambda chat_id, task, title: (lambda answer: answer and app.bot.send(chat_id, answer))(task())
 started = []
 
@@ -267,10 +270,20 @@ app.bot.sent = []
 app.watchdog()
 check("живую сборку (журнал растёт) сторож не трогает", alive.id not in stopped
       and app.jobs.by_id(alive.id).status == "running")
-check("сборку без движения 45 мин сторож гасит и освобождает машину", hung.id in stopped
-      and app.jobs.by_id(hung.id).status == "failed" and "зависла" in app.jobs.by_id(hung.id).meta["note"])
-check("и пишет предупреждение с кнопкой «повторить»", said(app.bot.sent, "нет движения", "зависла")
-      and any(f"repeat:{hung.meta['session']}" in markup for _, markup in app.bot.sent), str(app.bot.sent))
+check("сборку без движения 45 мин сторож гасит, освобождает машину и повторяет сам", hung.id in stopped
+      and app.jobs.by_id(hung.id).status == "queued" and "зависла" in app.jobs.by_id(hung.id).tail())
+check("и пишет предупреждение и что повторяет на том же профиле",
+      said(app.bot.sent, "нет движения", "зависла") and said(app.bot.sent, "Повторяю на том же профиле"),
+      str(app.bot.sent))
+hung = app.jobs.by_id(hung.id)
+hung.meta.update({"status": "running", "started": old})
+hung.save()
+os.utime(hung.log, (old, old))
+app.bot.sent = []
+app.watchdog()
+check("зависла второй раз — пауза с кнопкой «продолжить» (профиль один, круг пройден)",
+      app.jobs.by_id(hung.id).status == "paused"
+      and any(f"resume:{hung.meta['session']}" in markup for _, markup in app.bot.sent), str(app.bot.sent))
 again = app.jobs.add("hung2.epub", CHAT, short_book)
 again.meta.update({"status": "running", "started": old})
 again.save()

@@ -14,18 +14,20 @@ for _ in range(60):
 
 # Ждём и отказа Colab на limit.epub: отчёт о нём приходит лишь после ближайшего опроса бота,
 # поэтому здесь не полагаемся на «уже успел» — дожидаемся статуса задания и перечитываем сообщения.
-for _ in range(60):
+# Отказ повторяется: сначала тот же профиль ещё раз, затем круг профилей (здесь профиль один) —
+# и книга встаёт на паузу. Ждём именно паузы.
+for _ in range(90):
     jobs = json.loads(urllib.request.urlopen(os.environ["WEB_BASE"] + "/api/jobs", timeout=30).read())
-    if any(item["name"] == "limit.epub" and item["status"] == "failed" for item in jobs):
+    if any(item["name"] == "limit.epub" and item["status"] == "paused" for item in jobs):
         break
     time.sleep(2)
 
 # Статус в meta.json и сообщение в Telegram пишутся в одном такте бота, но читаются из разных
-# файлов: между «увидели failed» и «долетело sent.jsonl» может быть мгновение. Дожидаемся самого
+# файлов: между «увидели paused» и «долетело sent.jsonl» может быть мгновение. Дожидаемся самого
 # сообщения, а не полагаемся на то, что оно уже здесь.
 for _ in range(10):
     texts = [json.loads(line)["text"] for line in (state / "sent.jsonl").read_text().splitlines()]
-    if any(("заняты" in text or "подождите" in text) for text in texts):
+    if any("пауза" in text for text in texts):
         break
     time.sleep(1)
 
@@ -51,7 +53,14 @@ checks = [("по книге со страницы пришёл итог в Teleg
           ("случайный текст не считается кодом",
            any(("не похоже на код" in text.lower() or "уже есть" in text.lower()) for text in texts)),
           ("про занятые машины написано понятно",
-           any(("заняты" in text or "подождите" in text) for text in texts))]
+           any(("заняты" in text or "подождите" in text) for text in texts)),
+          ("после первого отказа бот сам повторяет на том же профиле",
+           any("limit.epub" in text and "Повторяю на том же профиле" in text for text in texts)),
+          ("после второго — пауза с причиной и кнопкой «продолжить»",
+           any("limit.epub" in item.get("text", "") and "пауза" in item.get("text", "")
+               and "resume:" in json.dumps(item, ensure_ascii=False) for item in sent)),
+          ("книга на паузе видна на странице с кнопкой «продолжить»",
+           "/resume/" in urllib.request.urlopen(os.environ["WEB_BASE"] + "/", timeout=30).read().decode())]
 for name, ok in checks:
     print(f"  {'✓' if ok else '✗'} {name}")
 sys.exit(0 if all(ok for _, ok in checks) else 1)

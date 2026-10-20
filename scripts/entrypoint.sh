@@ -4,7 +4,16 @@ set -eu
 
 DATA_DIR="${DATA_DIR:-/data}"
 mkdir -p "$DATA_DIR/books" "$DATA_DIR/results" "$DATA_DIR/jobs"
-mkdir -p "$HOME/.config/colab-cli" "$HOME/.config/qwen-book"
+mkdir -p "$HOME/.config/qwen-book"
+# colab-cli — ссылка на папку активного профиля Colab (bot/profiles.py). Ссылку на пропавшую папку
+# mkdir -p не переживает («File exists») — тогда создаём саму папку профиля, ссылку бот проверит.
+if [ -L "$HOME/.config/colab-cli" ]; then
+    target="$(readlink "$HOME/.config/colab-cli")"
+    case "$target" in /*) ;; *) target="$HOME/.config/$target" ;; esac
+    mkdir -p "$target"
+else
+    mkdir -p "$HOME/.config/colab-cli"
+fi
 
 if [ ! -f "$HOME/.config/colab-cli/settings.json" ]; then
     printf '{"enable_update_check": false}\n' > "$HOME/.config/colab-cli/settings.json"

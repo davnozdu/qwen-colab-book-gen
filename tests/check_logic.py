@@ -138,6 +138,7 @@ app.jobs = Jobs(work / "btn-data", HERE / "pipeline", max_jobs=1, env=dict(os.en
 app.state = {"offset": 0, "owner": CHAT, "seen": []}
 app.menu_chats = set()                               # ставится в __init__, здесь его нет
 app.colab = FakeLogin()
+app.profiles = __import__("profiles").Profiles(work / "colab-config")   # профили выключены
 
 
 def press(data: str) -> list:

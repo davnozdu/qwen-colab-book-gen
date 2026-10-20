@@ -28,6 +28,7 @@ import time
 
 import chains
 import colab_auth
+import profiles as colab_profiles
 import settings as bot_settings
 from jobs import Jobs, safe_stem
 from tgapi import Bot, TelegramError
@@ -43,6 +44,7 @@ SHRINK_HOURS = float(os.environ.get("SHRINK_HOURS", "7"))
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "1"))
 POLL = int(os.environ.get("POLL_SECONDS", "10"))
 LAUNCH_LOCK = threading.RLock()     # запуск заданий: очередь бота и страница работают в разных потоках
+FAILS_PER_PROFILE = 2               # столько сбоев подряд на одном профиле — и переходим на следующий
 
 HELP = """Я собираю аудиокниги через Google Colab.
 
@@ -59,6 +61,7 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /stop <номер> — остановить задание
 /login — войти в Google Colab (если вход истёк)
 /logout — сбросить вход в Colab (сменить Google-аккаунт)
+/profiles — профили Google Colab: войти, переключить, выйти, удалить
 /eta — сколько уже сделано и сколько осталось (по сегментам книги)
 /usage — остаток и активные машины аккаунта
 /help — эта подсказка
@@ -68,24 +71,27 @@ HELP = """Я собираю аудиокниги через Google Colab.
 
 Параметры запуска: машина %s, папка Drive «%s», резать книги длиннее %s ч.
 Меню висит внизу под полем ввода — «Статус», «Задания», «Сколько осталось», «Журнал», «Остаток»,
-«Войти в Colab», «Сбросить вход», «Остановить всё», «Помощь»: нажимайте кнопку, команды помнить
-не нужно.
+«Войти в Colab», «Сбросить вход», «Профили», «Остановить всё», «Помощь»: нажимайте кнопку,
+команды помнить не нужно.
+
+Профили — несколько аккаунтов Google Colab. Если сборка падает дважды подряд, бот сам переходит
+на следующий профиль; прошёл все — ставит книгу на паузу и пишет об этом.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
 
 # Инлайн-кнопки под сообщением: видны сразу под ответом (в истории чата остаются).
 MENU = [[("📊 Статус", "status"), ("⏳ Сколько осталось", "eta")],
         [("📋 Задания", "jobs"), ("📜 Журнал", "log")],
         [("📈 Остаток", "usage"), ("🔑 Войти в Colab", "login")],
-        [("🚪 Сбросить вход", "reset_ask"), ("❓ Помощь", "help")],
-        [("⏹ Остановить всё", "stop_ask")]]
+        [("🚪 Сбросить вход", "reset_ask"), ("👥 Профили", "profiles")],
+        [("⏹ Остановить всё", "stop_ask"), ("❓ Помощь", "help")]]
 
 # Постоянная клавиатура ПОД полем ввода: висит всегда, пока пользователь сам её не свернёт.
 # Подпись кнопки приходит обычным текстом, поэтому каждую подпись разбираем в menu_action().
 REPLY_MENU = [["📊 Статус", "⏳ Сколько осталось"],
               ["📋 Задания", "📜 Журнал"],
               ["📈 Остаток", "🔑 Войти в Colab"],
-              ["🚪 Сбросить вход", "❓ Помощь"],
-              ["⏹ Остановить всё"]]
+              ["🚪 Сбросить вход", "👥 Профили"],
+              ["⏹ Остановить всё", "❓ Помощь"]]
 
 # Подпись кнопки → действие. Ключи без эмодзи и знаков: menu_action() чистит текст до букв,
 # поэтому «📊 Статус» и набранное руками «статус» ведут себя одинаково.
@@ -95,7 +101,9 @@ REPLY_ACTIONS = {"статус": "status", "задания": "jobs", "журна
                  "сброситьавторизацию": "reset_ask", "выйти": "reset_ask", "сменитьаккаунт": "reset_ask",
                  "остановитьвсе": "stop_ask", "стоп": "stop_ask", "остановить": "stop_ask",
                  "сколькоосталось": "eta", "осталось": "eta", "прогресс": "eta", "сколькоеще": "eta",
-                 "долго": "eta", "скоро": "eta", "помощь": "help", "меню": "menu"}
+                 "долго": "eta", "скоро": "eta", "помощь": "help", "меню": "menu",
+                 "профили": "profiles", "профиль": "profiles", "аккаунты": "profiles",
+                 "переключитьпрофиль": "profiles"}
 
 # Список команд для кнопки «☰» рядом с полем ввода (ставится один раз при запуске).
 COMMANDS = [("status", "что делается прямо сейчас"), ("eta", "сколько сделано и сколько осталось"),
@@ -103,7 +111,14 @@ COMMANDS = [("status", "что делается прямо сейчас"), ("eta
             ("stop", "остановить сборку"), ("repeat", "собрать книгу заново"),
             ("delete", "убрать задание из списка"), ("login", "войти в Google Colab"),
             ("logout", "сбросить вход в Colab (сменить аккаунт)"),
+            ("profiles", "профили Google Colab"),
             ("usage", "остаток и активные машины"), ("help", "подсказка и меню")]
+
+
+def _number(data: str) -> int:
+    """Номер профиля из данных кнопки «profile_use:2»."""
+    tail = data.partition(":")[2]
+    return int(tail) if tail.isdigit() else 0
 
 
 def menu_action(text: str) -> str:
@@ -167,6 +182,7 @@ class ColabLogin:
         self.session = None
         self.url = ""
         self.note = ""
+        self.profiles = None             # профили Colab: вход идёт в активный, адрес узнаём после входа
 
     def awaiting_code(self) -> bool:
         """Открыт ли вход, ждущий код. Не важно, начат он в Telegram или на странице."""
@@ -183,6 +199,19 @@ class ColabLogin:
                 "url": self.url if self.session else "",
                 "note": self.note or ("ждём код из браузера" if self.session else "")}
 
+    def where(self) -> str:
+        """В какой профиль идёт вход — чтобы было видно, под каким аккаунтом подтверждать."""
+        if self.profiles is None or not self.profiles.enabled:
+            return ""
+        return f" (профиль {self.profiles.active()})"
+
+    def drop(self) -> None:
+        """Закрыть начатый вход: профиль переключили, а терминал CLI ждёт код для прежнего."""
+        if self.session:
+            self.session.close()
+            self.session, self.url = None, ""
+            self.note = "вход прежнего профиля закрыт"
+
     def begin(self) -> str:
         if self.session and self.session.expired():       # протухшую попытку закрываем
             self.session.close()
@@ -190,7 +219,7 @@ class ColabLogin:
             self.note = "прежняя попытка входа просрочена"
         if not self.session and self.login.terminal_logged_in():
             self.note = "вход есть"
-            return "Вход в Colab уже есть — авторизоваться заново не нужно."
+            return f"Вход в Colab{self.where()} уже есть — авторизоваться заново не нужно."
         if self.session:
             return "Вход уже начат: пришлите код из браузера."
         try:
@@ -203,7 +232,7 @@ class ColabLogin:
             return "CLI не выдал ссылку авторизации: " + session.summary()
         session.wait_for_prompt(60)
         self.session, self.url, self.note = session, url, "ждём код из браузера"
-        return ("Вход в Google Colab\n\n1. Откройте ссылку (можно с телефона):\n" + url +
+        return (f"Вход в Google Colab{self.where()}\n\n1. Откройте ссылку (можно с телефона):\n" + url +
                 "\n\n2. Войдите в нужный аккаунт и подтвердите доступ.\n"
                 "3. Google откроет СТРАНИЦУ С КОДОМ — скопируйте код и пришлите его мне следующим "
                 "сообщением.\n\nПока код не пришёл, вход не завершён: подтверждения в браузере "
@@ -224,7 +253,11 @@ class ColabLogin:
         # authorization code»), а по делу: появился token.json и CLI работает без запроса кода.
         if self.login.has_token() and self.login.terminal_logged_in():
             self.note = "вход выполнен"
-            return "✅ Вход выполнен, token.json сохранён в томе конфигов."
+            account = ""
+            if self.profiles is not None:
+                email = self.profiles.lookup(self.profiles.active())
+                account = f" Аккаунт: {email}." if email else ""
+            return f"✅ Вход{self.where()} выполнен, token.json сохранён в томе конфигов.{account}"
         self.note = "не получилось войти"
         return "Не получилось войти. Ответ CLI:\n" + (session.summary() or answer[-300:])
 
@@ -310,6 +343,10 @@ class App:
         self.jobs = Jobs(DATA, PIPELINE, max_jobs=MAX_JOBS)
         self.state = self.load_state()
         self.colab = ColabLogin(pathlib.Path(TOKEN_FILE))
+        # Профили Colab: папка CLI — ссылка на папку активного профиля; число задаётся в админке.
+        self.profiles = colab_profiles.Profiles(pathlib.Path(TOKEN_FILE).parent,
+                                                count=lambda: self.settings.profiles)
+        self.colab.profiles = self.profiles
         # Настройки обработки (режим, порог нарезки, Drive) — в томе: переживают обновление
         # образа. Меняются на странице, здесь объект общий со страницей.
         self.settings = bot_settings.Settings(DATA / "settings.json")
@@ -367,7 +404,14 @@ class App:
         """Завершившиеся задания: итог в чат; затем запускаем то, что стоит в очереди."""
         self.watchdog()
         for job in self.jobs.refresh().values():
-            self.report(job)
+            if self.can_failover(job):
+                self.after_failure(job)
+            else:
+                self.report(job)
+        self.resume_after_login()
+        if self.profiles.enabled and self.profiles.active() > self.profiles.count() \
+                and not self.machine_busy():
+            self.profiles.fit_count()            # число профилей уменьшили на странице
         self.chains_pass()
         for job in reversed(self.jobs.load()):
             if job.status == "queued" and self.jobs.free_slot():
@@ -413,10 +457,206 @@ class App:
                 job.log_line(f"сторож: остановить не вышло ({exc})")
             job.meta.update({"status": "failed", "finished": now, "note": note, "stalled": True})
             job.save()
-            member = job.meta.get("chain") and (job.meta.get("part_index") or job.meta.get("glue"))
-            self.send_to_job_chat(job, f"⏱ «{job.meta['name']}»: {note}."
-                                       + ("" if member else "\nПовторить сборку?"),
-                                  buttons=None if member else failed_menu(job.meta["session"]))
+            self.send_to_job_chat(job, f"⏱ «{job.meta['name']}»: {note}.")
+            if self.can_failover(job):
+                self.after_failure(job)          # повтор, следующий профиль или пауза — там же
+
+    # ────────────────────────────── профили Colab ──────────────────────────────
+    def machine_busy(self) -> bool:
+        """Идёт ли сборка на машине Colab: под ней профиль не меняем — её сессия в его папке."""
+        return any(not job.meta.get("local") for job in self.jobs.live_running())
+
+    def profile_action(self, action: str, number: int = 0) -> str:
+        """Действия с профилями — одно место для Telegram и страницы."""
+        profiles = self.profiles
+        if not profiles.enabled:
+            return "Профили недоступны: вход Colab хранится не в ~/.config/colab-cli."
+        busy = ("Сейчас идёт сборка на машине Colab — профиль под ней менять нельзя: её сессия "
+                "живёт в папке активного профиля. Дождитесь конца или остановите сборку.")
+        if action == "add":
+            count = self.settings.profiles + 1
+            if count > bot_settings.PROFILES_MAX:
+                return f"Профилей не больше {bot_settings.PROFILES_MAX}."
+            self.settings.set_profiles(count)
+            profiles.ensure(count)
+            return f"Добавлен профиль {count}. Войдите в него кнопкой «войти» у профиля {count}."
+        if action == "logout_all":
+            if self.machine_busy():
+                return busy
+            self.colab.drop()
+            return "\n".join(profiles.logout(number) for number in profiles.numbers())
+        number = int(number or 0)
+        if not 1 <= number <= profiles.count():
+            return f"Профиля {number} нет: их {profiles.count()}."
+        switching = action in ("activate", "login") and number != profiles.active()
+        if (switching or action == "delete" or (action == "logout" and number == profiles.active())) \
+                and self.machine_busy():
+            return busy
+        if switching:
+            self.colab.drop()
+            profiles.activate(number)
+        if action == "activate":
+            email = profiles.lookup(number) if profiles.signed_in(number) else ""
+            return (f"Активен профиль {number}" + (f" ({email})" if email else "")
+                    + (" — вход есть." if profiles.signed_in(number)
+                       else " — входа нет: нажмите «войти» у этого профиля."))
+        if action == "login":
+            return self.colab.begin()
+        if action == "logout":
+            if number == profiles.active():
+                self.colab.drop()
+            return profiles.logout(number)
+        if action == "delete":
+            self.colab.drop()
+            message, count = profiles.delete(number)
+            if count != self.settings.profiles:
+                self.settings.set_profiles(count)
+            return message
+        return "Неизвестное действие с профилем."
+
+    def profile_label(self, number: int = 0) -> str:
+        """«профиль 2 (name@gmail.com)»: адрес узнаём у Google один раз и держим в папке профиля."""
+        number = number or self.profiles.active()
+        if self.profiles.signed_in(number):
+            self.profiles.lookup(number, timeout=10)
+        return self.profiles.label(number)
+
+    def announce_profile(self, job) -> None:
+        """Перед запуском на машине: в журнал и в Telegram — под каким аккаунтом идёт сборка."""
+        number = self.profiles.active()
+        label = self.profile_label(number)
+        job.meta["profile"] = number
+        job.save()
+        job.log_line(f"Google Colab: {label}")
+        if self.profiles.enabled:
+            what = (f"часть {job.meta['part_index']}" if job.meta.get("part_index") else "сборка")
+            self.send_to_job_chat(job, f"👤 «{job.meta['name']}»: {what} идёт под {label}.")
+
+    def can_failover(self, job) -> bool:
+        """Отдельная книга, которая реально уходила на машину и упала: ей — повтор и профили.
+
+        Части книги повторяет проход по цепочкам, а то, что не запустилось вовсе (файл пропал),
+        повторять бессмысленно — это не сбой аккаунта.
+        """
+        return (job.status == "failed" and bool(job.meta.get("started"))
+                and not job.meta.get("chain") and not job.meta.get("local"))
+
+    def requeue(self, job, line: str) -> None:
+        job.meta.update({"status": "queued", "note": "", "finished": None, "result": ""})
+        job.save()
+        job.log_line(line)
+
+    def next_profile(self, tried) -> tuple:
+        """Следующий профиль по кругу: ("switch", n) — вход есть, ("login", n) — входа нет,
+        ("exhausted", 0) — круг пройден. На найденный профиль переключаемся сразу: так кнопка
+        «войти» поведёт именно в него."""
+        number = self.profiles.next_after(tried) if self.profiles.enabled else 0
+        if not number:
+            return "exhausted", 0
+        self.colab.drop()
+        self.profiles.activate(number)
+        return ("switch" if self.profiles.signed_in(number) else "login"), number
+
+    def after_failure(self, job) -> None:
+        """Сборка упала: второй раз на том же профиле, затем следующий профиль, затем пауза.
+
+        Круг по профилям один: прошли все — книга встаёт на паузу и ждёт «продолжить». Профиль
+        без входа тоже ставит паузу: бот просит войти в него и продолжает сам, как только вход есть.
+        """
+        name, session = job.meta["name"], job.meta["session"]
+        reason = job.meta.get("note") or "причина в журнале"
+        current = self.profiles.active()
+        label = self.profile_label(current)
+        failures = int(job.meta.get("profile_failures") or 0) + 1
+        if failures < FAILS_PER_PROFILE:
+            job.meta["profile_failures"] = failures
+            self.requeue(job, f"сбой на {label} ({failures} из {FAILS_PER_PROFILE}): {reason} — повторяю")
+            self.send_to_job_chat(job, f"↻ «{name}» упала на {label}.\nПричина: {reason}\n"
+                                       f"Повторяю на том же профиле.")
+            return
+        tried = list(job.meta.get("profiles_tried") or []) + [current]
+        job.meta.update({"profile_failures": 0, "profiles_tried": tried})
+        decision, number = self.next_profile(tried)
+        if decision == "switch":
+            following = self.profile_label(number)
+            self.requeue(job, f"на {label} упала {FAILS_PER_PROFILE} раза — перехожу на {following}")
+            self.send_to_job_chat(job, f"🔀 «{name}» упала {FAILS_PER_PROFILE} раза на {label}.\n"
+                                       f"Причина: {reason}\nПерехожу на {following} и повторяю.")
+            return
+        job.meta.update({"status": "paused", "finished": time.time()})
+        if decision == "login":
+            job.meta.update({"await_login": number,
+                             "note": f"ждёт входа в профиль {number}; последняя причина: {reason}"})
+            job.save()
+            job.log_line(f"на {label} упала {FAILS_PER_PROFILE} раза; следующий профиль {number} без входа — пауза")
+            self.send_to_job_chat(job, f"⏸ «{name}» упала {FAILS_PER_PROFILE} раза на {label}.\n"
+                                       f"Причина: {reason}\n\nСледующий — профиль {number}, но в него не "
+                                       f"выполнен вход. Войдите — и сборка продолжится сама.",
+                                  buttons=[[(f"🔑 Войти в профиль {number}", f"profile_login:{number}")],
+                                           [("▶️ Продолжить", f"resume:{session}"),
+                                            ("📜 Журнал", f"log:{session}")]])
+            return
+        job.meta["note"] = f"пауза: не справился ни один профиль; последняя причина: {reason}"
+        job.save()
+        job.log_line(f"пауза: упала на всех профилях ({', '.join(map(str, tried))})")
+        self.send_to_job_chat(job, f"⏸ «{name}»: пауза. Сборка упала на всех профилях "
+                                   f"({', '.join(map(str, tried))}) по {FAILS_PER_PROFILE} раза.\n"
+                                   f"Последняя причина: {reason}\n\n«Продолжить» — пройду по профилям заново.",
+                              buttons=[[("▶️ Продолжить", f"resume:{session}"), ("📜 Журнал", f"log:{session}")],
+                                       [("🏠 Меню", "menu")]])
+
+    def resume_job(self, job_id: str) -> str:
+        """«Продолжить» книгу на паузе: круг по профилям начинается заново, с активного."""
+        job = self.jobs.by_id(job_id)
+        if job is None:
+            return "Такого задания уже нет."
+        if job.status != "paused":
+            return f"«{job.meta['name']}» не на паузе — продолжать нечего."
+        for key in ("profile_failures", "profiles_tried", "await_login"):
+            job.meta.pop(key, None)
+        self.requeue(job, "продолжаю по вашей команде")
+        return f"▶️ «{job.meta['name']}»: продолжаю под {self.profile_label()}."
+
+    def resume_after_login(self) -> None:
+        """Вошли в профиль, которого ждала книга (или цепочка частей), — продолжаем сами."""
+        if not self.profiles.enabled:
+            return
+        active = self.profiles.active()
+        if not self.profiles.signed_in(active):
+            return
+        for job in self.jobs.load():
+            if job.status == "paused" and int(job.meta.get("await_login") or 0) == active:
+                job.meta.pop("await_login", None)
+                self.requeue(job, f"вход в профиль {active} есть — продолжаю")
+                self.send_to_job_chat(job, f"▶️ «{job.meta['name']}»: вход есть, продолжаю под "
+                                           f"{self.profile_label(active)}.")
+        for chain in self.chains.active():
+            if int(chain.meta.get("await_login") or 0) == active:
+                chain.meta.pop("await_login", None)
+                chain.save()
+                message = self.continue_chain(chain.id, keep_tried=True)
+                job = self.jobs.by_id(chain.meta.get("job") or "")
+                if job is not None:
+                    self.send_to_job_chat(job, f"▶️ Вход в профиль {active} есть. {message}")
+
+    def show_profiles(self, chat_id, text: str = "") -> None:
+        """Профили в Telegram: у каждого «войти», «выбрать», «выйти», «удалить»."""
+        profiles = self.profiles
+        if not profiles.enabled:
+            self.bot.send(chat_id, "Профили недоступны: вход Colab хранится не в ~/.config/colab-cli.")
+            return
+        rows = []
+        for number in profiles.numbers():
+            rows.append([(f"🔑 Войти {number}", f"profile_login:{number}"),
+                         (f"▶️ Выбрать {number}", f"profile_use:{number}"),
+                         (f"🚪 Выйти {number}", f"profile_logout:{number}"),
+                         (f"🗑 {number}", f"profile_delete_ask:{number}")])
+        rows.append([("➕ Добавить профиль", "profile_add"), ("🚪 Выйти из всех", "profile_logout_all_ask")])
+        rows.append([("🏠 Меню", "menu")])
+        head = (text + "\n\n" if text else "") + "Профили Google Colab (▶️ — активный):\n"
+        self.bot.send(chat_id, head + "\n".join(profiles.lines())
+                      + f"\n\nСборка падает {FAILS_PER_PROFILE} раза подряд — бот сам переходит на "
+                        f"следующий профиль; прошёл все — пауза.", buttons=rows)
 
     # ────────────────────────────── части книги ──────────────────────────────
     def start_chain(self, job, book: pathlib.Path) -> None:
@@ -498,6 +738,7 @@ class App:
                     changed = True
                 if part_job.status == chains.PART_DONE and part_job.meta.get("result"):
                     part["result"] = part_job.meta["result"]
+                    chain.meta.pop("profiles_tried", None)      # часть удалась — круг профилей заново
             if changed:
                 chain.save()
             done = [part for part in chain.parts if part.get("status") == chains.PART_DONE]
@@ -525,16 +766,50 @@ class App:
                                                f"упала — повторяю её сам.")
                     return
                 if chain.status != chains.FAILED:
-                    reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды. "
-                              f"Дальше идти нельзя: книга получится с дырой. "
+                    # Дважды на одном профиле — пробуем следующий; круг профилей один на часть.
+                    current = self.profiles.active()
+                    label = self.profile_label(current)
+                    tried = list(chain.meta.get("profiles_tried") or []) + [current]
+                    chain.meta["profiles_tried"] = tried
+                    decision, number = self.next_profile(tried)
+                    part_job = self.jobs.by_id(part.get("job_id") or "")
+                    note = (part_job.meta.get("note") or "") if part_job else ""
+                    if decision == "switch":
+                        part["retries"] = 0
+                        part["status"] = chains.PART_QUEUED
+                        if part_job is not None:
+                            self.requeue(part_job, f"повтор на {self.profile_label(number)}")
+                        chain.save()
+                        job.log_line(f"часть {part['index']} упала дважды на {label} — перехожу на профиль {number}")
+                        self.send_to_job_chat(job, f"🔀 «{job.meta['name']}», часть {part['index']} упала "
+                                                   f"дважды на {label}." + (f"\nПричина: {note}" if note else "")
+                                                   + f"\nПерехожу на {self.profile_label(number)} и повторяю.")
+                        return
+                    if decision == "login":
+                        chain.meta["await_login"] = number
+                        reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды на {label}; "
+                                  f"следующий — профиль {number}, но в него не выполнен вход. Войдите — "
+                                  f"и генерация продолжится сама.")
+                        chain.hold(reason)
+                        self.hold_part_jobs(chain)
+                        job.meta.update({"status": "waiting", "note": reason})
+                        job.save()
+                        job.log_line(f"остановлено: {reason}")
+                        self.send_to_job_chat(job, f"⏸ «{job.meta['name']}»: {reason}"
+                                                   + (f"\nПричина: {note}" if note else ""),
+                                              buttons=[[(f"🔑 Войти в профиль {number}", f"profile_login:{number}")]]
+                                              + self.part_buttons(chain, part))
+                        return
+                    reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды"
+                              + (f" на всех профилях ({', '.join(map(str, tried))})" if self.profiles.enabled
+                                 else "")
+                              + f". Дальше идти нельзя: книга получится с дырой. "
                               f"Повторить её — кнопкой здесь или «продолжить генерацию» на странице.")
                     chain.hold(reason)
                     self.hold_part_jobs(chain)
                     job.meta.update({"status": "waiting", "note": reason})
                     job.save()
                     job.log_line(f"остановлено: {reason}")
-                    part_job = self.jobs.by_id(part.get("job_id") or "")
-                    note = (part_job.meta.get("note") or "") if part_job else ""
                     self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}"
                                                + (f"\nПричина: {note}" if note else "")
                                                + "\n\nПовторить часть?",
@@ -717,11 +992,18 @@ class App:
         self.start_glue(chain, job)
         return f"Собираю «{chain.meta.get('name')}» из готовых частей — журнал у строки сборки."
 
-    def continue_chain(self, chain_id: str) -> str:
-        """Кнопка «продолжить генерацию»: с первой неготовой части, готовые не трогаем."""
+    def continue_chain(self, chain_id: str, keep_tried: bool = False) -> str:
+        """Кнопка «продолжить генерацию»: с первой неготовой части, готовые не трогаем.
+
+        Человек нажал «продолжить» — круг по профилям начинается заново. После входа в профиль,
+        которого ждала цепочка, круг продолжается (keep_tried): иначе он не кончился бы никогда.
+        """
         chain = self.chains.by_id(chain_id)
         if chain is None:
             return "Такой книги с частями уже нет."
+        if not keep_tried:
+            chain.meta.pop("profiles_tried", None)
+            chain.meta.pop("await_login", None)
         job = self.jobs.by_id(chain.meta.get("job") or "")
         if chain.status == chains.DONE and chain.all_done():
             return f"«{chain.meta.get('name')}»: все части уже готовы, продолжать нечего."
@@ -875,6 +1157,33 @@ class App:
             self.in_background(chat_id, self.colab.reset, "Сброс входа")
         elif data == "usage":
             self.show_usage(chat_id)
+        elif data == "profiles":
+            self.show_profiles(chat_id)
+        elif data == "profile_add":
+            self.show_profiles(chat_id, self.profile_action("add"))
+        elif data.startswith("profile_login:"):
+            number = _number(data)
+            self.bot.send(chat_id, f"Начинаю вход в профиль {number}, ссылка придёт через несколько секунд…")
+            self.in_background(chat_id, lambda: self.profile_action("login", number), "Вход в Colab")
+        elif data.startswith("profile_use:"):
+            self.show_profiles(chat_id, self.profile_action("activate", _number(data)))
+        elif data.startswith("profile_logout:"):
+            self.show_profiles(chat_id, self.profile_action("logout", _number(data)))
+        elif data.startswith("profile_delete_ask:"):
+            number = _number(data)
+            self.bot.send(chat_id, f"Удалить профиль {number}? Его вход уйдёт в корзину профилей, "
+                                   f"профили с большими номерами сдвинутся на один.",
+                          buttons=[[("🗑 Да, удалить", f"profile_delete:{number}"), ("↩️ Отмена", "profiles")]])
+        elif data.startswith("profile_delete:"):
+            self.show_profiles(chat_id, self.profile_action("delete", _number(data)))
+        elif data == "profile_logout_all_ask":
+            self.bot.send(chat_id, "Выйти из всех профилей Google Colab? Вход каждого отложится рядом "
+                                   "с меткой времени; потом войти можно снова.",
+                          buttons=[[("🚪 Да, выйти из всех", "profile_logout_all"), ("↩️ Отмена", "profiles")]])
+        elif data == "profile_logout_all":
+            self.show_profiles(chat_id, self.profile_action("logout_all"))
+        elif data.startswith("resume:"):              # книга на паузе: пройти по профилям заново
+            self.bot.send(chat_id, self.resume_job(data.partition(":")[2]))
         elif data == "stop_ask":                       # остановка «всё» — через подтверждение
             self.bot.send(chat_id, "Остановить всё: текущую сборку и очередь, машины освободить?",
                           buttons=[[("⏹ Да, остановить", "stop_all"), ("↩️ Отмена", "menu")]])
@@ -946,6 +1255,14 @@ class App:
             self.do_action(chat_id, "eta")
         elif head == "/usage":
             self.show_usage(chat_id)
+        elif head in ("/profiles", "/profile"):
+            if argument.isdigit():
+                self.show_profiles(chat_id, self.profile_action("activate", int(argument)))
+            else:
+                self.show_profiles(chat_id)
+        elif head in ("/resume", "/continue"):
+            self.bot.send(chat_id, self.resume_job(argument) if argument
+                          else "Что продолжить? /resume <номер из /jobs>")
         else:
             self.send_menu(chat_id, "Не знаю такой команды.\n\n" + HELP)
 
@@ -956,6 +1273,7 @@ class App:
         # Книга в режиме частей машину не занимает: её состояние — «режется» или «жду части».
         chains_now = [job for job in jobs if job.status in ("splitting", "waiting", "gluing")]
         asking = [job for job in jobs if job.status == "choice"]
+        paused = [job for job in jobs if job.status == "paused"]
         lines = []
         for job in running:
             minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
@@ -968,14 +1286,20 @@ class App:
             lines.append(f"✂️ {job.meta['name']} — {where}{note}")
         for job in queued:
             lines.append(f"⏳ {job.meta['name']} — в очереди")
+        for job in paused:
+            lines.append(f"⏸ {job.meta['name']} — {job.meta.get('note') or 'пауза'}"[:200])
         for job in asking:
             lines.append(f"❓ {job.meta['name']} — ≈{float(job.meta.get('hours_estimate') or 0):.1f} ч, "
                          f"ждёт ответа: резать на части или одним файлом")
         head = (f"Сейчас: {len(running) + len(chains_now)} в работе, {len(queued)} в очереди.")
         if not running and not queued and not chains_now and not asking:
             head = "Свободно: ничего не собирается."
+        if self.profiles.enabled:
+            head += f"\nGoogle Colab: {self.profile_label()}."
         buttons = [[("✂️ Резать «" + job.meta["name"][:20] + "»", f"cut:{job.id}"),
-                    ("📄 Одним файлом", f"whole:{job.id}")] for job in asking[:3]] + MENU
+                    ("📄 Одним файлом", f"whole:{job.id}")] for job in asking[:3]] + \
+                  [[("▶️ Продолжить «" + job.meta["name"][:20] + "»", f"resume:{job.meta['session']}")]
+                   for job in paused[:3]] + MENU
         self.bot.send(chat_id, head + ("\n\n" + "\n".join(lines) if lines else ""), buttons=buttons)
 
     def show_eta(self, chat_id) -> None:
@@ -1309,6 +1633,7 @@ class App:
                 if chain is None:
                     raise RuntimeError("книга с частями больше не найдена — начните её заново")
                 job.log_line(self.parts_line(chain, job.meta["part_index"]))
+                self.announce_profile(job)
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
                                        "--parts-dir", str(self.parts_dir(chain))])
@@ -1317,6 +1642,7 @@ class App:
             if split == "whole":
                 # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
                 job.log_line("режим: одна книга целиком — так решили на вопрос «резать ли»")
+                self.announce_profile(job)
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0)
                 return
             if (split == "parts" or self.settings.mode == bot_settings.MODE_PARTS) \
@@ -1324,6 +1650,7 @@ class App:
                 self.start_chain(job, book)
                 return
             job.log_line(self.settings.job_line())
+            self.announce_profile(job)
             self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
@@ -1421,6 +1748,10 @@ def main() -> int:
                                             else "не поставился"), flush=True)
     for path in (app.jobs.books, app.jobs.results, app.jobs.jobs_dir):
         path.mkdir(parents=True, exist_ok=True)
+    try:
+        print("[bot] " + app.profiles.prepare(), flush=True)
+    except OSError as exc:
+        print(f"[bot] профили Colab не подготовились: {exc}", flush=True)
     stale = app.jobs.fail_stale_queued()
     if stale:
         print(f"[bot] заданий, не успевших запуститься: {stale} — помечены неудачными, "
@@ -1442,7 +1773,9 @@ def main() -> int:
                           settings=app.settings, chains=app.chains,
                           continue_chain=app.continue_chain, glue=app.glue_chain,
                           ask_split=app.ask_split, choose_split=app.choose_split,
-                          retry_part=app.retry_part)
+                          retry_part=app.retry_part, profiles=app.profiles,
+                          profile_action=app.profile_action, resume=app.resume_job,
+                          profile_label=app.profile_label)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "
