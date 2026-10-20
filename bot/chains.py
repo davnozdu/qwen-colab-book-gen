@@ -21,6 +21,7 @@ RUNNING = "running"          # части собираются
 GLUING = "gluing"            # части готовы, книга собирается в контейнере
 DONE = "done"                # книга собрана
 FAILED = "failed"            # цепочка встала и ждёт человека
+REPLACED = "replaced"        # ту же книгу начали заново другой цепочкой: эту не показываем и не двигаем
 
 PART_QUEUED = "queued"
 PART_RUNNING = "running"
@@ -252,13 +253,21 @@ def pick_for(store: "Chains", book, job_id: str, name: str = "", chat_id: str = 
     Метку «job» ставим ВСЕГДА: цепочку двигает chains_pass, а находит он её по этой метке.
     Забыть её — значит получить части, которые собрались, но книгу никто не закрыл.
     """
-    unfinished = [item for item in store.of_book(book) if item.status != DONE and item.parts]
+    pending = [item for item in store.of_book(book) if item.status not in (DONE, REPLACED)]
+    unfinished = [item for item in pending if item.parts]
     if unfinished:
         chain = unfinished[0]                     # уже резали и не доделали: продолжаем, не режем заново
     else:
         chain = store.create(book, name, chat_id, parts_hours)
     chain.meta["job"] = job_id
     chain.save()
+    # У книги одна живая цепочка: прежние (например, упавшая нарезка) уходят из списка и из очереди,
+    # иначе на странице висели две плашки одной книги — старая с ошибкой и новая.
+    for other in pending:
+        if other.id != chain.id:
+            other.meta["status"] = REPLACED
+            other.meta["note"] = f"заменена новой цепочкой {chain.id}"
+            other.save()
     return chain
 
 
@@ -317,7 +326,34 @@ class Chains:
                 if str(pathlib.Path(chain.meta.get("book") or "").resolve()) == target]
 
     def active(self) -> list:
-        return [chain for chain in self.load() if chain.status in (SPLIT, RUNNING, GLUING, FAILED)]
+        """Живые цепочки — по одной на книгу, самая новая. Старшие дубли той же книги (остались от
+        версий до REPLACED) не показываются и не двигаются."""
+        seen, result = set(), []
+        for chain in self.load():                 # load() — от новых к старым
+            if chain.status not in (SPLIT, RUNNING, GLUING, FAILED):
+                continue
+            book = str(pathlib.Path(chain.meta.get("book") or "").resolve())
+            if book in seen:
+                continue
+            seen.add(book)
+            result.append(chain)
+        return result
+
+    def recent(self, limit: int = 5) -> list:
+        """Последние книги для страницы — по одной цепочке на книгу, самая новая, вместе с готовыми:
+        можно вернуться к прежней книге. Заменённые (книгу начали заново) не показываем."""
+        seen, result = set(), []
+        for chain in self.load():
+            if chain.status == REPLACED:
+                continue
+            book = str(pathlib.Path(chain.meta.get("book") or "").resolve())
+            if book in seen:
+                continue
+            seen.add(book)
+            result.append(chain)
+            if len(result) >= limit:
+                break
+        return result
 
     def gluing(self) -> list:
         """Цепочки, у которых все части готовы и идёт сборка книги."""

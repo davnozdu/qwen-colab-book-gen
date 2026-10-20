@@ -487,7 +487,9 @@ class WebApp:
         if self.chains is None:
             return ""
         cards = []
-        for chain in self.chains.load()[:5]:
+        # Последние пять книг, по одной плашке на книгу: упавшая и начатая заново книга не висит
+        # второй плашкой, а к прежним книгам можно вернуться.
+        for chain in self.chains.recent(5):
             rows = []
             for part in chain.parts:
                 job = self.jobs.by_id(part.get("job_id") or "")
@@ -576,6 +578,12 @@ class WebApp:
                 f'<input type="number" name="profiles" step="1" min="1" max="{bot_settings.PROFILES_MAX}" '
                 f'value="{self.settings.profiles}" style="width:4em"> '
                 f'<span class="muted">(аккаунты, между которыми бот переключается при сбоях)</span></div>'
+                f'<div style="margin-top:8px"><label>Хранить завершённое</label> '
+                f'<input type="number" name="keep_days" step="1" min="1" max="365" '
+                f'value="{self.settings.keep_days}" style="width:5em"> дн. '
+                f'<span class="muted">(старые задания и их журналы, книги по частям, архивы и книги '
+                f'удаляются сами; сырьё частей собранной книги — через сутки; журналы Colab CLI '
+                f'обрезаются)</span></div>'
                 f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
                 f'</form>'
                 f'<div class="muted" style="margin-top:8px">Сейчас: '
@@ -884,7 +892,7 @@ class WebApp:
                 names.add(pathlib.Path(job.meta.get("book") or "").name)
         if self.chains is not None:
             for chain in self.chains.load():
-                if chain.status not in ("done", "stopped"):
+                if chain.status not in ("done", "stopped", "replaced"):
                     names.add(pathlib.Path(chain.meta.get("book") or "").name)
         names.discard("")
         return names

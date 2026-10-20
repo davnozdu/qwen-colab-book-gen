@@ -28,6 +28,7 @@ import time
 
 import chains
 import colab_auth
+import housekeeping
 import profiles as colab_profiles
 import settings as bot_settings
 from jobs import Jobs, safe_stem
@@ -44,6 +45,7 @@ SHRINK_HOURS = float(os.environ.get("SHRINK_HOURS", "7"))
 MAX_JOBS = int(os.environ.get("MAX_JOBS", "1"))
 POLL = int(os.environ.get("POLL_SECONDS", "10"))
 LAUNCH_LOCK = threading.RLock()     # запуск заданий: очередь бота и страница работают в разных потоках
+SWEEP_SECONDS = 3600                # уборка томов — раз в час (и при старте)
 FAILS_PER_PROFILE = 2               # столько сбоев подряд на одном профиле — и переходим на следующий
 
 HELP = """Я собираю аудиокниги через Google Colab.
@@ -403,6 +405,7 @@ class App:
     def tick(self) -> None:
         """Завершившиеся задания: итог в чат; затем запускаем то, что стоит в очереди."""
         self.watchdog()
+        self.housekeeping()
         for job in self.jobs.refresh().values():
             if self.can_failover(job):
                 self.after_failure(job)
@@ -416,6 +419,24 @@ class App:
         for job in reversed(self.jobs.load()):
             if job.status == "queued" and self.jobs.free_slot():
                 self.launch(job)
+
+    def housekeeping(self, force: bool = False) -> list:
+        """Уборка томов раз в час: старые задания, книги по частям, сырьё, архивы, журналы CLI."""
+        now = time.time()
+        if not force and now - float(getattr(self, "last_sweep", 0)) < SWEEP_SECONDS:
+            return []
+        self.last_sweep = now
+        settings = getattr(self, "settings", None)
+        days = settings.keep_days if settings is not None else bot_settings.DEFAULTS["keep_days"]
+        try:
+            done = housekeeping.sweep(DATA, pathlib.Path(TOKEN_FILE).parent.parent, self.jobs,
+                                      self.chains, days, now)
+        except Exception as exc:                 # уборка не должна ронять бота
+            print(f"[bot] уборка не удалась: {exc}", flush=True)
+            return []
+        if done:
+            print(f"[bot] уборка (хранить {days} дн.): " + ", ".join(done), flush=True)
+        return done
 
     def activity(self, job) -> float:
         """Последний признак жизни. Сборка книги в контейнере кодирует звук ffmpeg-ом молча
@@ -1759,6 +1780,9 @@ def main() -> int:
         print("[bot] " + app.profiles.prepare(), flush=True)
     except OSError as exc:
         print(f"[bot] профили Colab не подготовились: {exc}", flush=True)
+    swept = app.housekeeping(force=True)
+    print(f"[bot] уборка томов: {', '.join(swept) if swept else 'убирать нечего'} "
+          f"(хранить {app.settings.keep_days} дн., дальше — раз в час)", flush=True)
     stale = app.jobs.fail_stale_queued()
     if stale:
         print(f"[bot] заданий, не успевших запуститься: {stale} — помечены неудачными, "

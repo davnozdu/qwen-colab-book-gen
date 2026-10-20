@@ -344,6 +344,39 @@ check("и конец журнала нарезки — в журнале зад�
       "No module named 'bs4'" in app.jobs.by_id(split_job.id).tail()
       and "bs4" in app.jobs.by_id(split_job.id).meta["note"])
 
+# ── 10. книгу после упавшей нарезки начали заново: на странице одна плашка ───
+dup_book = make_epub(work / "dup.epub", 40000)
+old_chain = app.chains.create(dup_book, "Дубль", CHAT, 0.5)
+old_chain.meta.update({"status": chains_mod.FAILED, "note": "нарезка на части не удалась"})
+old_chain.save()
+legacy = app.chains.create(dup_book, "Дубль", CHAT, 0.5)        # дубль, оставшийся от прежней версии
+legacy.meta.update({"status": chains_mod.FAILED})
+legacy.save()
+__import__("time").sleep(1.1)                                   # номера цепочек — по времени создания
+fresh_job = app.jobs.add("dup.epub", CHAT, dup_book)
+fresh = chains_mod.pick_for(app.chains, dup_book, fresh_job.id, "Дубль", CHAT, 0.5)
+check("новая нарезка книги заменяет прежние цепочки этой книги",
+      fresh.id not in (old_chain.id, legacy.id)
+      and app.chains.by_id(old_chain.id).status == chains_mod.REPLACED
+      and app.chains.by_id(legacy.id).status == chains_mod.REPLACED)
+card = page.chains_card()
+check("на странице у книги одна плашка — текущая", card.count("Книга по частям: Дубль") == 1
+      and fresh.id in card and old_chain.id not in card, card[:300])
+stale = app.chains.create(dup_book, "Дубль", CHAT, 0.5)          # старый дубль без пометки «заменена»
+stale.meta.update({"status": chains_mod.FAILED})
+stale.save()
+check("и дубли из прежних версий тоже не показываются: по одной плашке на книгу",
+      page.chains_card().count("Книга по частям: Дубль") == 1
+      and len([c for c in app.chains.active() if c.meta.get("name") == "Дубль"]) == 1)
+for number in range(6):
+    other = app.chains.create(make_epub(work / f"other{number}.epub", 3000), f"Другая {number}", CHAT, 0.5)
+    other.meta.update({"status": chains_mod.DONE})
+    other.save()
+recent = app.chains.recent(5)
+check("на странице — последние пять книг, готовые тоже, по одной плашке на книгу",
+      len(recent) == 5 and len({c.meta["book"] for c in recent}) == 5
+      and page.chains_card().count("Книга по частям") == 5)
+
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
 sys.exit(1 if bad else 0)

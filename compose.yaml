@@ -31,3 +31,10 @@ services:
 
     # Обязательно: Colab CLI спрашивает подтверждение Drive и код авторизации.
     tty: true
+
+    # Журнал контейнера (docker compose logs) не растёт бесконечно: 3 файла по 10 МБ.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -22,9 +22,11 @@ MODE_BOOK = "book"
 MODE_PARTS = "parts"
 MODES = {MODE_BOOK: "одна книга целиком, без нарезки",
          MODE_PARTS: "с разбивкой на части"}
-DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1}
+DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1,
+            "keep_days": 30}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 HOURS_MIN, HOURS_MAX = 0.5, 12.0
+KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое
 PROFILES_MAX = 10                   # аккаунтов Google Colab, между которыми бот переключается
 TRUTHY = {"1", "on", "true", "yes", "да", "вкл"}
 
@@ -69,6 +71,15 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"профилей Colab — от 1 до {PROFILES_MAX}")
     except (TypeError, ValueError):
         problems.append("число профилей Colab должно быть целым (например, 2)")
+    keep = values.get("keep_days", DEFAULTS["keep_days"])
+    try:
+        days = int(float(str(keep).replace(",", ".")))
+        if KEEP_MIN <= days <= KEEP_MAX:
+            clean["keep_days"] = days
+        else:
+            problems.append(f"срок хранения — от {KEEP_MIN} до {KEEP_MAX} дней")
+    except (TypeError, ValueError):
+        problems.append("срок хранения должен быть числом дней (например, 30)")
     drive = values.get("drive", DEFAULTS["drive"])
     clean["drive"] = drive if isinstance(drive, bool) else str(drive).strip().lower() in TRUTHY
     return clean, problems
@@ -124,6 +135,10 @@ class Settings:
     def profiles(self) -> int:
         return int(self.values.get("profiles", DEFAULTS["profiles"]))
 
+    @property
+    def keep_days(self) -> int:
+        return int(self.values.get("keep_days", DEFAULTS["keep_days"]))
+
     def set_profiles(self, count: int) -> str:
         """Число профилей из кнопок «добавить/удалить профиль» — остальные настройки не трогаем."""
         return self.update(dict(self.values, profiles=count))
@@ -135,7 +150,7 @@ class Settings:
         line = (f"режим «{self.title()}», части по {self.parts_hours:g} ч, "
                 f"Google Drive: {'да' if self.drive else 'нет'}, "
                 f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}, "
-                f"профилей Colab: {self.profiles}")
+                f"профилей Colab: {self.profiles}, хранить завершённое {self.keep_days} дн.")
         if self.mode == MODE_BOOK:
             line += " (в этом режиме нарезка не используется)"
         else:
