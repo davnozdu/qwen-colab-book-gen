@@ -189,6 +189,24 @@ check("ключ отклонён — книга сразу идёт одним �
 app.launch(app.jobs.by_id(broken.id))
 check("и запускается без пакета", started[-1]["job"] == broken.id and "--voice-pack" not in started[-1]["extra"])
 
+crash_book = work / "crash.epub"
+crash_book.write_bytes(b"PK crash book")
+crashing = app.jobs.add("crash.epub", CHAT, crash_book)
+app.launch(crashing)
+crash_cast = app.jobs.by_id(app.jobs.by_id(crashing.id).meta["cast_job"])
+app.launch(crash_cast)
+crash_cast = app.jobs.by_id(crash_cast.id)
+crash_cast.meta.update({"status": "failed", "finished": time.time(),
+                        "note": "Сборка закончилась, но архив не забрался с машины."})
+crash_cast.save()
+crash_cast.log_line("ValueError: 'cast' is not in list\nSystemExit: конвейер упал с кодом 1\n"
+                    "пакет голосов не забрался с попытки 1")
+app.bot.sent = []
+app.casting_pass()
+check("конвейер упал на разметке — не повтор по профилям, а сразу один голос с причиной",
+      app.jobs.by_id(crash_cast.id).status == "failed" and app.jobs.by_id(crashing.id).status == "queued"
+      and said(app.bot.sent, "'cast' is not in list", "одним голосом"), str(app.bot.sent))
+
 third_book = work / "third.epub"
 third_book.write_bytes(b"PK third book")
 waiting = app.jobs.add("third.epub", CHAT, third_book)
@@ -334,7 +352,8 @@ busy.save()
 app.bot.sent = []
 app.do_action(CHAT, "books")
 check("«📚 Книги»: заново, журнал, удалить голоса",
-      any("repeat:" in m and f"voices_delete:{key}" in m and "log:" in m for _, m in app.bot.sent), str(app.bot.sent[:2]))
+      any(("repeat:" in m or "chain_restart:" in m) and f"voices_delete:{key}" in m and "log:" in m
+          for _, m in app.bot.sent), str(app.bot.sent[:2]))
 app.do_action(CHAT, f"voices_delete:{key}")
 app.do_action(CHAT, f"voices_delete_do:{key}")
 check("«удалить голоса» с подтверждением удаляет пакет", app.voice_packs.pack(book) is None

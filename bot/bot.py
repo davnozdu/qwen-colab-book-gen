@@ -898,6 +898,14 @@ class App:
                 return line.strip()[:300]
         return ""
 
+    @staticmethod
+    def pipeline_error(job) -> str:
+        """Последняя строка ошибки Python в журнале («ValueError: …») — причина для человека."""
+        for line in reversed(job.tail(20000).splitlines()):
+            if re.match(r"\s*\w+(Error|Exception): ", line):
+                return line.strip()[:300]
+        return ""
+
     def casting_pass(self) -> None:
         """Книги, ждущие голоса: пакет готов — озвучка; сбой машины — повтор и профили; иное — один голос."""
         for job in self.jobs.load():
@@ -920,13 +928,18 @@ class App:
                 if "бот перезапускали" in str(cast.meta.get("note") or ""):
                     self.requeue(cast, "бот перезапускали — запускаю голоса заново")
                     continue
-                trouble = cast.meta.get("stalled") or diagnose(cast.tail(20000))
+                tail = cast.tail(20000)
+                # «Конвейер упал» — ошибка разметки или голосов, а не машины: «архив не забрался»
+                # тогда лишь следствие, и повтор на другом профиле упадёт так же.
+                crashed = "конвейер упал с кодом" in tail
+                trouble = cast.meta.get("stalled") or (diagnose(tail) and not crashed)
                 if trouble and not self.llm_failure(cast) and self.can_failover(cast):
                     self.after_failure(cast)     # машина Colab: повтор, следующий профиль, пауза
                     continue
                 cast.meta["handled"] = True
                 cast.save()
-                reason = self.llm_failure(cast) or cast.meta.get("note") or cast.last_error() or "причина в журнале"
+                reason = (self.llm_failure(cast) or (self.pipeline_error(cast) if crashed else "")
+                          or cast.meta.get("note") or cast.last_error() or "причина в журнале")
                 self.single_voice(job, f"разметка ролей не удалась ({reason})")
 
     def single_voice(self, job, reason: str) -> None:
