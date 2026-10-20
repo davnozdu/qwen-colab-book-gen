@@ -186,7 +186,7 @@ class WebApp:
                  notify=None, settings=None, chains=None, continue_chain=None, glue=None,
                  ask_split=None, choose_split=None, retry_part=None, profiles=None,
                  profile_action=None, resume=None, profile_label=None, voice_packs=None,
-                 refresh_models=None, restart_book=None):
+                 refresh_models=None, restart_book=None, choose_voices=None, delete_voices=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -217,6 +217,9 @@ class WebApp:
         self.refresh_models = refresh_models or (lambda: "Список моделей недоступен в этой сборке.")
         # «Вся книга заново» для книги по частям: новая нарезка и все части с нуля.
         self.restart_book = restart_book or (lambda chain_id, chat_id="": "Недоступно в этой сборке.")
+        # Повторная сборка с готовыми голосами: «старые голоса / с нуля»; и «удалить голоса».
+        self.choose_voices = choose_voices or (lambda job_id, keep, why="": "Недоступно в этой сборке.")
+        self.delete_voices = delete_voices or (lambda key: "Недоступно в этой сборке.")
         # «Продолжить» книгу на паузе: круг по профилям заново.
         self.resume = resume or (lambda job_id: "Продолжение недоступно в этой сборке.")
         self.last_message = ""
@@ -396,6 +399,18 @@ class WebApp:
             message = self.glue(chain)
             self.last_message = message
             self.notify(f"Сборка книги со страницы: {message}")
+            return self.redirect("/", message)
+        if method == "POST" and parsed.path.startswith("/voices/choice/"):
+            pieces = parsed.path.strip("/").split("/")
+            job = self.jobs.by_id(pieces[2]) if len(pieces) == 4 else None
+            if job is None or pieces[3] not in ("keep", "new"):
+                return self.redirect("/", "Такого задания нет.")
+            message = self.choose_voices(job.id, pieces[3] == "keep")
+            self.notify("Со страницы: " + message)
+            return self.redirect("/", message)
+        if method == "POST" and parsed.path.startswith("/voices/delete/"):
+            message = self.delete_voices(path_las(parsed.path))
+            self.notify("Со страницы: " + message)
             return self.redirect("/", message)
         if method == "POST" and parsed.path.startswith("/chain/restart/"):
             message = self.restart_book(path_las(parsed.path))
@@ -608,8 +623,11 @@ class WebApp:
                             f'<div class="muted">{html.escape(voice["about"])}</div></td>'
                             f'<td>{voice["lines"]}</td><td>{player}</td></tr>')
             llm_line = " · ".join(str(v) for v in (pack["llm"].get("provider"), pack["llm"].get("model")) if v)
+            remove = (f'<form class="inline" method="post" action="/voices/delete/{pack["key"]}" '
+                      f"onsubmit=\"return confirm('Удалить голоса этой книги? Следующая сборка создаст их "
+                      f"заново.')\"><button class=\"ghost\" type=\"submit\">удалить голоса</button></form>")
             cards.append(f'<div class="card"><h2>Голоса: {html.escape(pack["title"])}</h2>'
-                         f'<div class="muted">разметка ролей: {html.escape(llm_line)}</div>'
+                         f'<div class="muted">разметка ролей: {html.escape(llm_line)} · {remove}</div>'
                          f'<table style="margin-top:8px"><tr><th>Роль</th><th>Реплик</th><th>Образец</th></tr>'
                          f'{"".join(rows)}</table></div>')
         return "".join(cards)
@@ -676,7 +694,7 @@ class WebApp:
         meta = job.meta
         icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
                  "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸",
-                 "paused": "⏸", "casting": "🎭"}
+                 "paused": "⏸", "casting": "🎭", "choice_voices": "🎭"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
@@ -715,6 +733,11 @@ class WebApp:
                            f'времени до конца">сколько осталось</a>')
             actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
                            f'<button class="ghost" type="submit">остановить</button></form>')
+        elif job.status == "choice_voices":
+            for choice, label, hint in (("keep", "старые голоса", "Взять готовые голоса этой книги"),
+                                        ("new", "голоса с нуля", "Заново разметка ролей и голоса героев")):
+                actions.append(f'<form class="inline" method="post" action="/voices/choice/{job.meta["session"]}/'
+                               f'{choice}"><button type="submit" title="{hint}">{label}</button></form>')
         elif job.status == "paused":
             # Пауза после круга по профилям (или ждёт входа в следующий профиль): «продолжить».
             actions.append(f'<form class="inline" method="post" action="/resume/{job.meta["session"]}">'
@@ -979,7 +1002,7 @@ class WebApp:
         names = set()
         for job in self.jobs.load():
             if job.status in ("running", "queued", "choice", "splitting", "waiting", "gluing", "held",
-                              "casting", "paused"):
+                              "casting", "paused", "choice_voices"):
                 names.add(pathlib.Path(job.meta.get("book") or "").name)
         if self.chains is not None:
             for chain in self.chains.load():
@@ -1022,6 +1045,8 @@ class WebApp:
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
                                        "«остановить всё».")
         job = self.jobs.add(book.name, "", book)
+        job.meta["ask_voices"] = True        # повтор: голоса книги есть — спросить, старые или с нуля
+        job.save()
         if self.ask_split(job, book):
             return self.redirect("/", f"«{book.name}» длинная — выберите в строке задания: резать на "
                                       f"части или одним файлом (вопрос продублирован в Telegram).")

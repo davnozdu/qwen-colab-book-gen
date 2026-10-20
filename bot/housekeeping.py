@@ -8,7 +8,8 @@
   /data/chains/<id>       книги по частям (готовые, упавшие, заменённые) старше срока — удаляются
                           вместе с сырьём частей /data/parts/<id>;
   /data/parts/<id>        сырьё частей ГОТОВОЙ книги — через RAW_DONE_DAYS: книга уже собрана,
-                          а сырьё — гигабайты;
+                          а сырьё — гигабайты; сырьё заменённой нарезки («вся книга заново») — сразу;
+  /data/jobs/*/secrets.env ключ LLM, не прочитанный заданием, — через час;
   /data/voices/<книга>    пакеты голосов многоголосых книг — последние VOICE_PACKS_KEEP (5) книг;
   /data/results, books    архивы и книги старше срока — удаляются; книги, которые сейчас в работе, —
                           никогда;
@@ -16,11 +17,14 @@
                           хвоста; history/*.jsonl, отложенные копии входа (*.backup-*) и корзина
                           удалённых профилей — старше срока удаляются.
 
-Живое не трогаем: задания в работе, в очереди, на паузе, ждущие ответа; цепочки в работе.
+Живое не трогаем: задания в работе, в очереди, на паузе, ждущие ответа; цепочки в работе. Но
+«живое», в котором дольше срока ничего не менялось и процесса нет, — брошенное: удаляется вместе
+с нарезкой и сырьём; папки с повреждённым состоянием — тоже по сроку.
 """
 
 from __future__ import annotations
 
+import json
 import pathlib
 import shutil
 import time
@@ -31,7 +35,8 @@ CLI_LOG_KEEP = 1024 * 1024
 RAW_DONE_DAYS = 1                      # сырьё частей собранной книги
 DAY = 24 * 3600
 
-LIVE_JOBS = {"running", "queued", "choice", "splitting", "waiting", "gluing", "held", "paused", "casting"}
+LIVE_JOBS = {"running", "queued", "choice", "splitting", "waiting", "gluing", "held", "paused", "casting",
+             "choice_voices"}
 VOICE_PACKS_KEEP = 5                   # пакеты голосов: последние пять книг (повтор и части берут готовые)
 LIVE_CHAINS = {"split", "running", "gluing"}
 
@@ -51,6 +56,23 @@ def _remove(path: pathlib.Path) -> bool:
             path.unlink()
         return True
     except OSError:
+        return False
+
+
+def _idle(folder: pathlib.Path, now: float) -> float:
+    """Сколько секунд в папке ничего не менялось (по самому свежему файлу)."""
+    try:
+        moments = [item.stat().st_mtime for item in pathlib.Path(folder).rglob("*")]
+        moments.append(pathlib.Path(folder).stat().st_mtime)
+    except OSError:
+        return 0.0
+    return now - max(moments)
+
+
+def _readable(meta: pathlib.Path) -> bool:
+    try:
+        return isinstance(json.loads(meta.read_text(encoding="utf-8")), dict)
+    except (OSError, ValueError):
         return False
 
 
@@ -78,7 +100,8 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
     limit = max(1.0, float(keep_days)) * DAY
     data, config = pathlib.Path(data), pathlib.Path(config)
     done = {"заданий": 0, "журналов обрезано": 0, "книг по частям": 0, "сырья частей": 0,
-            "архивов": 0, "книг": 0, "файлов CLI": 0, "пакетов голосов": 0}
+            "архивов": 0, "книг": 0, "файлов CLI": 0, "пакетов голосов": 0,
+            "брошенных заданий": 0, "повреждённых папок": 0}
 
     # ── задания ──
     in_use = set()
@@ -86,6 +109,13 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
         status = job.status
         moment = float(job.meta.get("finished") or job.meta.get("created") or 0)
         if status in LIVE_JOBS:
+            # Брошенное: «живой» статус, но процесса нет и ничего не менялось дольше срока
+            # (зависло, на паузе или ждёт ответа месяц) — удаляем вместе с журналом.
+            running = status == "running" and jobs.alive(job)
+            if not running and _idle(job.path, now) > limit:
+                if _remove(job.path):
+                    done["брошенных заданий"] += 1
+                continue
             in_use.add(pathlib.Path(job.meta.get("book") or "").name)
             continue
         if moment and now - moment > limit:
@@ -95,10 +125,34 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
         if keep_tail(job.log, JOB_LOG_LIMIT, JOB_LOG_LIMIT // 2):
             done["журналов обрезано"] += 1
 
+    # ── папки без читаемого состояния (оборванная запись, ручная правка): загрузчик их пропускает,
+    #    и сами они не исчезли бы никогда ──
+    for root in (data / "jobs", data / "chains"):
+        if root.is_dir():
+            for folder in root.iterdir():
+                if folder.is_dir() and not _readable(folder / "meta.json") and _idle(folder, now) > limit:
+                    if _remove(folder):
+                        done["повреждённых папок"] += 1
+
+    # ── ключ LLM, который задание не прочитало (не стартовало): не держим на диске ──
+    for secret in (data / "jobs").glob("*/secrets.env"):
+        if _age(secret, now) > 3600 and _remove(secret):
+            done["файлов CLI"] += 1
+
     # ── книги по частям и их сырьё ──
     live_chains = set()
     for chain in chains.load():
         raw = data / "parts" / str(chain.id)
+        if chain.status in LIVE_CHAINS and not _chain_job_live(jobs, chain) \
+                and min(_idle(chain.folder, now), _idle(raw, now) if raw.exists() else limit + 1) > limit:
+            # Нарезка «в работе», а её книги уже нет (брошена и убрана) и ничего не менялось:
+            # остатки — вместе с сырьём частей.
+            removed = _remove(chain.folder)
+            if raw.exists():
+                _remove(raw)
+            if removed:
+                done["брошенных заданий"] += 1
+            continue
         if chain.status in LIVE_CHAINS or (chain.status == "failed" and _chain_job_live(jobs, chain)):
             live_chains.add(str(chain.id))
             in_use.add(pathlib.Path(chain.meta.get("book") or "").name)
@@ -114,6 +168,9 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
         if chain.status == "failed":
             in_use.add(pathlib.Path(chain.meta.get("book") or "").name)   # её ещё могут продолжить
         if chain.status == "done" and raw.exists() and now - moment > RAW_DONE_DAYS * DAY:
+            if _remove(raw):
+                done["сырья частей"] += 1
+        if chain.status == "replaced" and raw.exists():   # книгу начали заново: старое сырьё не нужно
             if _remove(raw):
                 done["сырья частей"] += 1
     parts_root = data / "parts"

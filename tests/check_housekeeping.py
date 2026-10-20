@@ -116,6 +116,39 @@ check("старая история CLI и отложенный вход удал
 check("сам вход профиля не трогается, даже старый", token.exists())
 check("повторная уборка ничего лишнего не находит", housekeeping.sweep(data, config, jobs, chains, 30) == [])
 
+# ── брошенное: «живой» статус, но месяц без движения; остатки нарезки; битые папки ──
+def age_tree(folder, days):
+    for item in [folder, *folder.rglob("*")]:
+        age(item, days)
+
+
+abandoned = jobs.add("hung.epub", "1", live_book)
+abandoned.meta.update({"status": "waiting", "chain": "x"})
+abandoned.save()
+age_tree(abandoned.path, 40)
+fresh_wait = jobs.add("wait.epub", "1", live_book)
+fresh_wait.meta.update({"status": "choice"})
+fresh_wait.save()
+orphan_chain = chains.create(old_book, "Брошенная", "1", 1.5)
+orphan_chain.meta.update({"status": "running", "job": abandoned.id})
+orphan_chain.save()
+orphan_raw = data / "parts" / orphan_chain.id
+(orphan_raw / "part-1").mkdir(parents=True)
+(orphan_raw / "part-1" / "a.flac").write_bytes(b"x")
+age_tree(orphan_chain.folder, 40)
+age_tree(orphan_raw, 40)
+broken = data / "jobs" / "20200101-000000-dead"
+broken.mkdir(parents=True)
+(broken / "meta.json").write_text("{оборвано")
+(broken / "log.txt").write_text("x")
+age_tree(broken, 40)
+housekeeping.sweep(data, config, jobs, chains, 30)
+check("брошенное задание (месяц без движения в «живом» статусе) удалено", jobs.by_id(abandoned.id) is None)
+check("свежее ждущее ответа задание осталось", jobs.by_id(fresh_wait.id) is not None)
+check("нарезка брошенной книги удалена вместе с сырьём частей",
+      chains.by_id(orphan_chain.id) is None and not orphan_raw.exists())
+check("папка задания с повреждённым состоянием удалена по сроку", not broken.exists())
+
 failed = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)}, не прошло: {len(failed)})")
 sys.exit(1 if failed else 0)

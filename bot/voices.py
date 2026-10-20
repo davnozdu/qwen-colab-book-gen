@@ -84,6 +84,16 @@ class VoicePacks:
                 continue
         return result
 
+    def delete(self, key: str) -> bool:
+        """Удалить голоса книги (пакет, образцы, кэш разметки): следующая сборка создаст их с нуля."""
+        if not key or not key.isalnum():
+            return False
+        folder = self.root / key
+        if not folder.is_dir():
+            return False
+        shutil.rmtree(folder, ignore_errors=True)
+        return not folder.exists()
+
     def sample(self, key: str, voice_id: str):
         """Путь к образцу для страницы — только внутри своей папки."""
         if not key.isalnum() or not all(ch.isalnum() or ch in "_-" for ch in voice_id):

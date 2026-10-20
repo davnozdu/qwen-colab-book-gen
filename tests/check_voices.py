@@ -282,6 +282,86 @@ check("уборка хранит пакеты голосов последних 
       len(left) >= 5 and app.voice_packs.folder(book).name in left
       and f"{0:016x}" not in left and f"{6:016x}" in left, str(left))
 
+# ── 8. повторная сборка с готовыми голосами: спросить; молчание — с нуля ────
+for item in app.jobs.load():                                # прежние задания этой книги закончились
+    if item.status not in ("done", "failed", "stopped"):
+        item.meta["status"] = "stopped"
+        item.save()
+app.settings.change(voices="multi")
+make_pack(app.voice_packs.folder(book))
+app.voice_packs.accept(app.voice_packs.folder(book) / "Книга с пробелами-voices.zip")
+done_job = app.jobs.add("Книга с пробелами.epub", CHAT, book)
+done_job.meta.update({"status": "done"})
+done_job.save()
+app.bot.sent = []
+app.repeat_job(CHAT, done_job.meta["session"])
+asking = next(j for j in app.jobs.load() if j.status == "choice_voices")
+check("повтор книги с готовыми голосами — вопрос «старые или с нуля» с кнопками",
+      any(f"voices_keep:{asking.id}" in m and f"voices_new:{asking.id}" in m for _, m in app.bot.sent)
+      and said(app.bot.sent, "60 с"), str(app.bot.sent))
+app.do_action(CHAT, f"voices_keep:{asking.id}")
+check("«старые голоса» — сборка сразу с готовым пакетом",
+      started[-1]["job"] == asking.id and "--voice-pack" in started[-1]["extra"])
+item = app.jobs.by_id(asking.id)
+item.meta["status"] = "stopped"
+item.save()
+app.repeat_job(CHAT, done_job.meta["session"])
+silent = next(j for j in app.jobs.load() if j.status == "choice_voices")
+silent.meta["voices_deadline"] = time.time() - 1
+silent.save()
+app.bot.sent = []
+app.voices_timeouts()
+silent = app.jobs.by_id(silent.id)
+check("молчание минуту — голоса удалены и создаются с нуля (задание «голоса»)",
+      silent.status == "casting" and app.voice_packs.pack(book) is None
+      and said(app.bot.sent, "ответа не было", "с нуля"), str(app.bot.sent))
+silent.meta["status"] = "stopped"
+silent.save()
+cast_left = app.jobs.by_id(silent.meta["cast_job"])
+cast_left.meta["status"] = "stopped"
+cast_left.save()
+
+# ── 9. удалить голоса, «📚 Книги» ───────────────────────────────────────────
+make_pack(app.voice_packs.folder(book))
+app.voice_packs.accept(app.voice_packs.folder(book) / "Книга с пробелами-voices.zip")
+key = app.voice_packs.folder(book).name
+busy = app.jobs.add("Книга с пробелами.epub", CHAT, book)
+busy.meta.update({"status": "running", "voice_pack": str(app.voice_packs.folder(book) / "x-voices.zip")})
+busy.save()
+check("голоса идущей сборки удалить нельзя", "остановите" in app.delete_voices(key) and app.voice_packs.pack(book))
+busy.meta["status"] = "done"
+busy.save()
+app.bot.sent = []
+app.do_action(CHAT, "books")
+check("«📚 Книги»: заново, журнал, удалить голоса",
+      any("repeat:" in m and f"voices_delete:{key}" in m and "log:" in m for _, m in app.bot.sent), str(app.bot.sent[:2]))
+app.do_action(CHAT, f"voices_delete:{key}")
+app.do_action(CHAT, f"voices_delete_do:{key}")
+check("«удалить голоса» с подтверждением удаляет пакет", app.voice_packs.pack(book) is None
+      and said(app.bot.sent, "удалены"))
+make_pack(app.voice_packs.folder(book))
+app.voice_packs.accept(app.voice_packs.folder(book) / "Книга с пробелами-voices.zip")
+page = webmod.WebApp(app.jobs, settings=app.settings, chains=app.chains, voice_packs=app.voice_packs,
+                     choose_voices=app.choose_voices, delete_voices=app.delete_voices)
+check("страница: у голосов книги кнопка «удалить голоса»", f"/voices/delete/{key}" in page.jobs_page(1))
+page.route("POST", f"/voices/delete/{key}")
+check("страница: голоса удаляются", app.voice_packs.pack(book) is None)
+
+# ── 10. мусор: сырьё заменённой нарезки, забытый ключ ───────────────────────
+replaced = app.chains.create(book, "Заменённая", CHAT, 0.5)
+replaced.meta["status"] = "replaced"
+replaced.save()
+raw = work / "data" / "parts" / replaced.id
+raw.mkdir(parents=True)
+(raw / "part1.flac").write_bytes(b"x" * 100)
+stale = app.jobs.add("x.epub", CHAT, book)
+(stale.path / "secrets.env").write_text("export LLM_API_KEY='k'")
+old = time.time() - 7200
+os.utime(stale.path / "secrets.env", (old, old))
+housekeeping.sweep(work / "data", work / "nohome", app.jobs, app.chains, 30)
+check("уборка: сырьё заменённой нарезки удаляется сразу, забытый ключ — через час",
+      not raw.exists() and not (stale.path / "secrets.env").exists())
+
 failed = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)}, не прошло: {len(failed)})")
 sys.exit(1 if failed else 0)
