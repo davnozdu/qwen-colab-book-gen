@@ -415,6 +415,47 @@ app.repeat_job(CHAT, stopped_parent.meta["session"])
 check("«повторить» у самой книги по частям — тоже вся книга заново", said(app.bot.sent, "всю книгу заново"),
       str(app.bot.sent))
 
+# ── 12. часть озвучена, упала сборка части — пересобрать здесь, без машины ──
+botmod.DATA = work / "data"                                     # сырьё частей — во временном томе
+glue_book_epub = make_epub(work / "gluefail.epub", 40000)
+glue_parent = app.jobs.add("gluefail.epub", CHAT, glue_book_epub)
+glue_chain = app.chains.create(glue_book_epub, "Сборка части", CHAT, 0.5)
+glue_chain.meta["job"] = glue_parent.id
+glue_chain.set_parts([{"index": 1, "total": 1, "title": "Сборка части — часть 1 из 1", "epub": str(glue_book_epub),
+                       "hours": 0.3}])
+glue_part = app.jobs.add("gluefail-part1.epub", CHAT, glue_book_epub)
+glue_part.meta.update({"chain": glue_chain.id, "part_index": 1, "parts_total": 1, "status": "failed",
+                       "note": "шаг «Часть 1: m4b и read-along» упал", "book": str(work / "gluefail-part1.epub")})
+glue_part.save()
+glue_part.log_line("сырьё части 1 распаковано: /data/parts/x/part-1\nОшибка: [Errno 18] Invalid cross-device link")
+glue_chain.parts[0].update({"job_id": glue_part.id, "status": "failed"})
+glue_chain.save()
+glue_parent.meta.update({"status": "waiting", "chain": glue_chain.id})
+glue_parent.save()
+raw_dir = app.parts_dir(glue_chain) / "part-1"
+raw_dir.mkdir(parents=True, exist_ok=True)
+(raw_dir / "raw.flac").write_bytes(b"x")
+local_runs = []
+real_local = app.jobs.start_local
+app.jobs.start_local = lambda job_obj, script, arguments: local_runs.append((job_obj.id, str(script), list(arguments)))
+started_before = len(started)
+app.bot.sent = []
+app.chains_pass()
+check("упала только сборка части — она пересобирается здесь из сырья, машина не нужна",
+      local_runs and local_runs[-1][0] == glue_part.id and local_runs[-1][1].endswith("glue_book.py")
+      and "--part" in local_runs[-1][2] and local_runs[-1][2][-1] == "gluefail-part1"
+      and len(started) == started_before and said(app.bot.sent, "без машины"), str((local_runs, app.bot.sent)))
+again_part = app.jobs.by_id(glue_part.id)
+again_part.meta.update({"status": "failed"})
+again_part.save()
+chain_again = app.chains.by_id(glue_chain.id)
+chain_again.parts[0]["status"] = "failed"
+chain_again.save()
+app.chains_pass()
+check("пересборка не помогла — дальше обычный повтор части (один раз сами)",
+      len(local_runs) == 1 and app.jobs.by_id(glue_part.id).status == "queued")
+app.jobs.start_local = real_local
+
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
 sys.exit(1 if bad else 0)

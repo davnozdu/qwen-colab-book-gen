@@ -428,6 +428,7 @@ class Jobs:
                                            stdin=subprocess.DEVNULL, start_new_session=True,
                                            env=env, cwd=str(self.pipeline))
             job.meta["pid"] = process.pid
+        job.meta.pop("local", None)          # прежняя местная пересборка части: теперь это машина
         job.meta.update({"book": str(book), "status": "running", "started": time.time()})
         job.save()
 

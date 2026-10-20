@@ -1093,6 +1093,8 @@ class App:
             # Упавшую часть повторяем САМИ один раз: чаще всего это «заняты машины» или обрыв
             # сессии. Второй раз не упорствуем — зовём человека, иначе цепочка молотит впустую.
             for part in chain.failed():
+                if self.reglue_part(chain, part, job):
+                    return                       # сырьё уже в томе: собираем здесь, машину не трогаем
                 if int(part.get("retries") or 0) < chains.RETRIES:
                     part["retries"] = int(part.get("retries") or 0) + 1
                     part["status"] = chains.PART_QUEUED
@@ -1161,6 +1163,34 @@ class App:
             if chain.all_done() and chain.status != chains.DONE:
                 self.finish_chain(chain, job)
                 return
+
+    def reglue_part(self, chain, part, job) -> bool:
+        """Часть озвучена, сырьё распаковано в томе, а упала сборка части в контейнере — собираем
+        её заново здесь же, без машины. Повтор озвучки на Colab стоил бы ещё десятков минут GPU.
+        Один раз: не вышло и это — обычный повтор части."""
+        part_job = self.jobs.by_id(part.get("job_id") or "")
+        raw = self.parts_dir(chain) / f"part-{part['index']}"
+        if part_job is None or part_job.meta.get("reglued") or not raw.is_dir() or not any(raw.iterdir()) \
+                or f"сырьё части {part['index']} распаковано" not in part_job.tail(40000):
+            return False
+        glue = PIPELINE / "glue_book.py"
+        name = pathlib.Path(part_job.meta.get("book") or "").stem
+        part_job.meta.update({"reglued": True, "note": "", "finished": None, "result": ""})
+        part_job.save()
+        part_job.log_line(f"сборка части упала, но сырьё части {part['index']} уже в томе — собираю её здесь, "
+                          f"без машины Colab")
+        try:
+            self.jobs.start_local(part_job, glue, ["--mode", "part", "--part", str(part["index"]),
+                                                   "--parts-dir", str(self.parts_dir(chain)),
+                                                   "--out", str(self.jobs.results), "--name", name])
+        except Exception as exc:
+            part_job.log_line(f"пересобрать часть не вышло: {exc}")
+            return False
+        part["status"] = chains.PART_RUNNING
+        chain.save()
+        self.send_to_job_chat(job, f"🧩 «{job.meta['name']}», часть {part['index']}: озвучка готова, упала "
+                                   f"только сборка части — собираю её заново здесь, без машины Colab.")
+        return True
 
     def hold_part_jobs(self, chain) -> None:
         """Остановленная цепочка не должна запускать следующие части сама.
