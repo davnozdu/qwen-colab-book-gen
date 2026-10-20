@@ -375,7 +375,7 @@ class Jobs:
 
     @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
-              max_hours: float = 7.0, extra: list | None = None) -> None:
+              max_hours: float = 7.0, extra: list | None = None, secrets: dict | None = None) -> None:
         # Статус берём с диска, а не из снимка в памяти: одно задание запускают двое —
         # очередь бота (по своему списку) и страница, — а снимок успевает устареть.
         # Второй запуск доходил до tmux и перебивал человеческое объяснение ошибки
@@ -401,8 +401,20 @@ class Jobs:
             command.extend(["--telegram-chat", chat])
         command.extend(extra or [])
         log = job.log
+        env = dict(self.env)
+        prelude = ""
+        if secrets:
+            # Ключи (LLM) — не в командной строке и не в журнале: файл 0600, который оболочка
+            # задания читает и сразу удаляет. Без tmux — просто окружение процесса.
+            env.update({k: str(v) for k, v in secrets.items()})
+            if self.has_tmux:
+                secret_file = job.path / "secrets.env"
+                with open(os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w",
+                          encoding="utf-8") as handle:
+                    handle.write("".join(f"export {k}={_quote(str(v))}\n" for k, v in secrets.items()))
+                prelude = f". {_quote(str(secret_file))}; rm -f {_quote(str(secret_file))}; "
         if self.has_tmux:
-            shell = " ".join(_quote(part) for part in command)
+            shell = prelude + " ".join(_quote(part) for part in command)
             done = subprocess.run(["tmux", "new-session", "-d", "-s", job.meta["session"], "-c",
                                    str(self.pipeline), f"{shell} >> {_quote(str(log))} 2>&1"],
                                   capture_output=True, text=True, env=self.env)
@@ -414,7 +426,7 @@ class Jobs:
             with log.open("ab") as handle:
                 process = subprocess.Popen(command, stdout=handle, stderr=handle,
                                            stdin=subprocess.DEVNULL, start_new_session=True,
-                                           env=self.env, cwd=str(self.pipeline))
+                                           env=env, cwd=str(self.pipeline))
             job.meta["pid"] = process.pid
         job.meta.update({"book": str(book), "status": "running", "started": time.time()})
         job.save()
@@ -518,6 +530,13 @@ class Jobs:
                 subprocess.run(["tmux", "kill-session", "-t", job.meta["session"]],
                                capture_output=True, env=self.env)
             archives = [path for path in job.archives() if pathlib.Path(path).exists()]
+            if job.meta.get("pack_dir"):
+                # Задание «голоса» (первая машина многоголосой книги): итог — пакет голосов в своей
+                # папке, свежее начала задания. По журналу его не ищем: в имени книги бывают пробелы.
+                started = float(job.meta.get("started") or 0) - 5
+                packs = [path for path in pathlib.Path(job.meta["pack_dir"]).glob("*-voices.zip")
+                         if path.stat().st_mtime >= started]
+                archives = [str(max(packs, key=lambda path: path.stat().st_mtime))] if packs else []
             job.meta["finished"] = time.time()
             if archives:
                 job.meta.update({"status": "done", "result": archives[-1]})

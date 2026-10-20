@@ -29,9 +29,11 @@ import time
 import chains
 import colab_auth
 import housekeeping
+import llm
+import voices as voice_packs
 import profiles as colab_profiles
 import settings as bot_settings
-from jobs import Jobs, safe_stem
+from jobs import Jobs, diagnose, safe_stem
 from tgapi import Bot, TelegramError
 
 DATA = pathlib.Path(os.environ.get("DATA_DIR", "/data"))
@@ -64,6 +66,7 @@ HELP = """Я собираю аудиокниги через Google Colab.
 /login — войти в Google Colab (если вход истёк)
 /logout — сбросить вход в Colab (сменить Google-аккаунт)
 /profiles — профили Google Colab: войти, переключить, выйти, удалить
+/voices — многоголосая озвучка: вкл/выкл, поставщик LLM, ключ, модель
 /eta — сколько уже сделано и сколько осталось (по сегментам книги)
 /usage — остаток и активные машины аккаунта
 /help — эта подсказка
@@ -85,7 +88,8 @@ MENU = [[("📊 Статус", "status"), ("⏳ Сколько осталось"
         [("📋 Задания", "jobs"), ("📜 Журнал", "log")],
         [("📈 Остаток", "usage"), ("🔑 Войти в Colab", "login")],
         [("🚪 Сбросить вход", "reset_ask"), ("👥 Профили", "profiles")],
-        [("⏹ Остановить всё", "stop_ask"), ("❓ Помощь", "help")]]
+        [("🎭 Голоса", "voices"), ("⏹ Остановить всё", "stop_ask")],
+        [("❓ Помощь", "help")]]
 
 # Постоянная клавиатура ПОД полем ввода: висит всегда, пока пользователь сам её не свернёт.
 # Подпись кнопки приходит обычным текстом, поэтому каждую подпись разбираем в menu_action().
@@ -93,7 +97,8 @@ REPLY_MENU = [["📊 Статус", "⏳ Сколько осталось"],
               ["📋 Задания", "📜 Журнал"],
               ["📈 Остаток", "🔑 Войти в Colab"],
               ["🚪 Сбросить вход", "👥 Профили"],
-              ["⏹ Остановить всё", "❓ Помощь"]]
+              ["🎭 Голоса", "⏹ Остановить всё"],
+              ["❓ Помощь"]]
 
 # Подпись кнопки → действие. Ключи без эмодзи и знаков: menu_action() чистит текст до букв,
 # поэтому «📊 Статус» и набранное руками «статус» ведут себя одинаково.
@@ -105,7 +110,8 @@ REPLY_ACTIONS = {"статус": "status", "задания": "jobs", "журна
                  "сколькоосталось": "eta", "осталось": "eta", "прогресс": "eta", "сколькоеще": "eta",
                  "долго": "eta", "скоро": "eta", "помощь": "help", "меню": "menu",
                  "профили": "profiles", "профиль": "profiles", "аккаунты": "profiles",
-                 "переключитьпрофиль": "profiles"}
+                 "переключитьпрофиль": "profiles", "голоса": "voices", "многоголосие": "voices",
+                 "llm": "voices"}
 
 # Список команд для кнопки «☰» рядом с полем ввода (ставится один раз при запуске).
 COMMANDS = [("status", "что делается прямо сейчас"), ("eta", "сколько сделано и сколько осталось"),
@@ -114,6 +120,7 @@ COMMANDS = [("status", "что делается прямо сейчас"), ("eta
             ("delete", "убрать задание из списка"), ("login", "войти в Google Colab"),
             ("logout", "сбросить вход в Colab (сменить аккаунт)"),
             ("profiles", "профили Google Colab"),
+            ("voices", "многоголосая озвучка и LLM"),
             ("usage", "остаток и активные машины"), ("help", "подсказка и меню")]
 
 
@@ -349,6 +356,9 @@ class App:
         self.profiles = colab_profiles.Profiles(pathlib.Path(TOKEN_FILE).parent,
                                                 count=lambda: self.settings.profiles)
         self.colab.profiles = self.profiles
+        # Пакеты голосов многоголосых книг (разметка ролей LLM + образцы героев) — в томе.
+        self.voice_packs = voice_packs.VoicePacks(DATA)
+        self.awaiting_key = {}           # чат → поставщик LLM, чей ключ ждём следующим сообщением
         # Настройки обработки (режим, порог нарезки, Drive) — в томе: переживают обновление
         # образа. Меняются на странице, здесь объект общий со страницей.
         self.settings = bot_settings.Settings(DATA / "settings.json")
@@ -407,11 +417,14 @@ class App:
         self.watchdog()
         self.housekeeping()
         for job in self.jobs.refresh().values():
+            if job.meta.get("cast"):
+                continue                         # «голоса» решает проход по книгам ниже
             if self.can_failover(job):
                 self.after_failure(job)
             else:
                 self.report(job)
         self.resume_after_login()
+        self.casting_pass()
         if self.profiles.enabled and self.profiles.active() > self.profiles.count() \
                 and not self.machine_busy():
             self.profiles.fit_count()            # число профилей уменьшили на странице
@@ -660,6 +673,61 @@ class App:
                 if job is not None:
                     self.send_to_job_chat(job, f"▶️ Вход в профиль {active} есть. {message}")
 
+    def show_voices(self, chat_id, text: str = "") -> None:
+        """«🎭 Голоса» в Telegram — те же настройки, что на странице: режим, поставщик, ключ, модель."""
+        settings = self.settings
+        provider = settings.llm_provider
+        key = settings.llm_key
+        lines = [f"Озвучка: {bot_settings.VOICES[settings.voices]}.",
+                 f"LLM: {llm.PROVIDERS[provider]} · модель {settings.llm_model} · ключ "
+                 + (llm.masked(key) if key else "не задан"),
+                 "Многоголосая книга идёт на двух машинах по очереди: сначала разметка ролей и голоса "
+                 "героев, потом озвучка. Без ключа LLM книга озвучивается одним голосом."]
+        other = "deepseek" if provider == "ollama" else "ollama"
+        rows = [[("🎭 Многоголосая: " + ("вкл → выключить" if settings.voices == "multi" else "выкл → включить"),
+                  "voices_toggle")],
+                [(f"🔁 Поставщик: {llm.PROVIDERS[other]}", f"llm_provider:{other}")],
+                [("🔑 Ввести ключ", "llm_key"), ("📋 Считать модели", "llm_models")],
+                [("🏠 Меню", "menu")]]
+        self.bot.send(chat_id, (text + "\n\n" if text else "") + "\n".join(lines), buttons=rows)
+
+    def refresh_models(self) -> str:
+        """«Считать модели» со страницы: список поставщика по ключу — в настройки, для выбора."""
+        provider = self.settings.llm_provider
+        try:
+            names = llm.list_models(provider, self.settings.llm_key)
+        except ValueError as exc:
+            return f"Модели не считались: {exc}"
+        self.settings.change(llm_models=dict(self.settings.values.get("llm_models") or {}, **{provider: names}))
+        mark = "есть" if self.settings.llm_model in names else "НЕТ в списке — выберите другую"
+        return (f"{llm.PROVIDERS[provider]}: моделей {len(names)}; выбранная {self.settings.llm_model} — {mark}. "
+                f"Выберите модель в настройках и сохраните.")
+
+    def show_models(self, chat_id) -> None:
+        provider, key = self.settings.llm_provider, self.settings.llm_key
+        try:
+            names = llm.list_models(provider, key)
+        except ValueError as exc:
+            self.show_voices(chat_id, f"Модели не считались: {exc}")
+            return
+        self.settings.change(llm_models=dict(self.settings.values.get("llm_models") or {}, **{provider: names}))
+        current = self.settings.llm_model
+        rows = [[(("✅ " if name == current else "") + name, f"llm_model:{name}")] for name in names[:40]
+                if len(f"llm_model:{name}".encode()) <= 64]
+        rows.append([("↩️ Назад", "voices")])
+        self.bot.send(chat_id, f"Модели {llm.PROVIDERS[provider]}: {len(names)}. Выберите:", buttons=rows)
+
+    def accept_llm_key(self, chat_id, text: str, message_id=None) -> None:
+        provider = self.awaiting_key.pop(str(chat_id), self.settings.llm_provider)
+        self.settings.change(**{f"{provider}_key": text.strip()})
+        if message_id is not None:
+            try:                                  # ключ не должен висеть в переписке
+                self.bot.call("deleteMessage", {"chat_id": str(chat_id), "message_id": str(message_id)})
+            except Exception:
+                pass
+        self.show_voices(chat_id, f"Ключ {llm.PROVIDERS[provider]} сохранён ({llm.masked(text)}). "
+                                  f"Сообщение с ключом удалено из переписки.")
+
     def show_profiles(self, chat_id, text: str = "") -> None:
         """Профили в Telegram: у каждого «войти», «выбрать», «выйти», «удалить»."""
         profiles = self.profiles
@@ -679,6 +747,132 @@ class App:
                       + f"\n\nСборка падает {FAILS_PER_PROFILE} раза подряд — бот сам переходит на "
                         f"следующий профиль; прошёл все — пауза.", buttons=rows)
 
+    # ────────────────────────────── многоголосая книга ──────────────────────────────
+    WAITING = object()                   # книга ждёт пакет голосов: озвучка — после первой машины
+
+    def voice_pack_for(self, job, book: pathlib.Path):
+        """Пакет голосов для книги: путь, None (один голос) или WAITING (поставлено задание «голоса»).
+
+        Многоголосие требует LLM: нет ключа — книга озвучивается одним голосом, с пояснением.
+        Пакет хранится по хешу книги, поэтому повтор той же книги машину на разметку не тратит.
+        """
+        if self.settings.voices != "multi" or job.meta.get("single_voice"):
+            return None
+        if job.meta.get("voice_pack") and pathlib.Path(job.meta["voice_pack"]).is_file():
+            return pathlib.Path(job.meta["voice_pack"])
+        ready = self.voice_packs.pack(book)
+        if ready is not None:
+            job.meta["voice_pack"] = str(ready)
+            job.save()
+            job.log_line(f"многоголосая: беру готовый пакет голосов этой книги ({ready.name})")
+            return ready
+        if not self.settings.llm_key:
+            reason = (f"многоголосая озвучка включена, но нет ключа "
+                      f"{llm.PROVIDERS[self.settings.llm_provider]} — озвучиваю одним голосом")
+            job.meta["single_voice"] = reason
+            job.save()
+            job.log_line(reason)
+            self.send_to_job_chat(job, f"ℹ️ «{job.meta['name']}»: {reason}. Ключ задаётся в настройках "
+                                       f"(страница или «🎭 Голоса» в Telegram).")
+            return None
+        cast = self.jobs.add(f"{job.meta['name']} — голоса", job.meta.get("chat_id") or "", book)
+        cast.meta.update({"cast": True, "parent": job.id, "pack_dir": str(self.voice_packs.folder(book))})
+        cast.save()
+        cast.log_line(f"многоголосая книга «{job.meta['name']}»: первая машина — разметка ролей "
+                      f"({self.settings.llm_provider}, {self.settings.llm_model}) и образцы голосов")
+        job.meta.update({"status": "casting", "cast_job": cast.id,
+                         "note": "первая машина: разметка ролей и голоса героев"})
+        job.save()
+        job.log_line(f"многоголосая: сначала голоса (задание {cast.meta['session']}), потом озвучка")
+        self.send_to_job_chat(job, f"🎭 «{job.meta['name']}»: многоголосая книга. Сначала одна машина "
+                                   f"размечает роли ({llm.PROVIDERS[self.settings.llm_provider]}, "
+                                   f"{self.settings.llm_model}) и создаёт голоса героев, потом другая озвучивает.")
+        return self.WAITING
+
+    def start_cast(self, job, book: pathlib.Path) -> None:
+        """Первая машина: ключ LLM — заданию через окружение, не в командную строку."""
+        folder = pathlib.Path(job.meta.get("pack_dir") or self.voice_packs.folder(book))
+        folder.mkdir(parents=True, exist_ok=True)
+        self.announce_profile(job)
+        self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0,
+                        extra=["--cast", "--out-dir", str(folder)],
+                        secrets={"LLM_PROVIDER": self.settings.llm_provider,
+                                 "LLM_MODEL": self.settings.llm_model, "LLM_API_KEY": self.settings.llm_key})
+
+    @staticmethod
+    def llm_failure(job) -> str:
+        """Что сказал конвейер про LLM (ключ, баланс, сеть) — строка для человека."""
+        for line in reversed(job.tail(20000).splitlines()):
+            if re.search(r"(?i)(отклонил ключ|нет ключа|недостаточно средств|ошибка запроса \(HTTP|"
+                         r"попытки исчерпаны|не удалось получить корректный ответ|нет связи с (Ollama|DeepSeek))",
+                         line):
+                return line.strip()[:300]
+        return ""
+
+    def casting_pass(self) -> None:
+        """Книги, ждущие голоса: пакет готов — озвучка; сбой машины — повтор и профили; иное — один голос."""
+        for job in self.jobs.load():
+            if job.status != "casting":
+                continue
+            cast = self.jobs.by_id(job.meta.get("cast_job") or "")
+            if cast is None:
+                self.single_voice(job, "задание «голоса» пропало")
+                continue
+            if cast.status in ("queued", "running", "paused") or cast.meta.get("handled"):
+                continue
+            if cast.status == "done":
+                self.cast_ready(job, cast)
+            elif cast.status == "stopped":
+                cast.meta["handled"] = True
+                cast.save()
+                job.meta.update({"status": "stopped", "finished": time.time(), "note": "остановлено на голосах"})
+                job.save()
+            elif cast.status == "failed":
+                if "бот перезапускали" in str(cast.meta.get("note") or ""):
+                    self.requeue(cast, "бот перезапускали — запускаю голоса заново")
+                    continue
+                trouble = cast.meta.get("stalled") or diagnose(cast.tail(20000))
+                if trouble and not self.llm_failure(cast) and self.can_failover(cast):
+                    self.after_failure(cast)     # машина Colab: повтор, следующий профиль, пауза
+                    continue
+                cast.meta["handled"] = True
+                cast.save()
+                reason = self.llm_failure(cast) or cast.meta.get("note") or cast.last_error() or "причина в журнале"
+                self.single_voice(job, f"разметка ролей не удалась ({reason})")
+
+    def single_voice(self, job, reason: str) -> None:
+        job.meta.update({"single_voice": reason, "status": "queued", "note": ""})
+        job.save()
+        job.log_line(f"{reason} — озвучиваю одним голосом")
+        self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: {reason}.\nОзвучиваю одним голосом — сборка "
+                                   f"не останавливается.")
+
+    def cast_ready(self, job, cast) -> None:
+        """Пакет пришёл: состав героев и образцы — в Telegram (и на страницу), книга — на озвучку."""
+        cast.meta["handled"] = True
+        cast.save()
+        try:
+            described = self.voice_packs.accept(cast.meta["result"])
+        except (OSError, ValueError, KeyError) as exc:
+            self.single_voice(job, f"пакет голосов не читается ({exc})")
+            return
+        job.meta.update({"voice_pack": cast.meta["result"], "status": "queued", "note": ""})
+        job.save()
+        heroes = [v for v in described["voices"] if not v["fixed"]]
+        job.log_line(f"голоса готовы: героев {len(heroes)} — " + ", ".join(v["name"] for v in heroes))
+        lines = [f"• {v['name']} — реплик {v['lines']}" + (f": {v['about']}" if v["about"] else "")
+                 for v in heroes]
+        self.send_to_job_chat(job, f"🎭 «{job.meta['name']}»: голоса готовы — героев {len(heroes)}, рассказчик "
+                                   f"прежний.\n" + "\n".join(lines[:40])
+                                   + "\n\nОбразцы — ниже и на странице. Начинаю озвучку.")
+        chat = str(job.meta.get("chat_id") or "") if looks_like_chat_id(job.meta.get("chat_id")) else self.owner_chat()
+        sender = getattr(self.bot, "send_audio", None)
+        if chat and sender:
+            for voice in heroes[:15]:
+                if voice["sample"]:
+                    sender(chat, pathlib.Path(voice["sample"]), caption=f"{voice['name']}: «{voice['text'][:200]}»",
+                           title=voice["name"])
+
     # ────────────────────────────── части книги ──────────────────────────────
     def start_chain(self, job, book: pathlib.Path) -> None:
         """Режим частей: книга режется ЗДЕСЬ (не на машине) и собирается частями.
@@ -690,6 +884,11 @@ class App:
                                 job.meta.get("name") or book.stem,
                                 job.meta.get("chat_id") or self.owner_chat(),
                                 self.settings.parts_hours)
+        if job.meta.get("voice_pack") and not job.meta.get("single_voice"):
+            chain.meta["voice_pack"] = job.meta["voice_pack"]    # все части — одними голосами
+        else:
+            chain.meta.pop("voice_pack", None)
+        chain.save()
         job.meta.update({"status": "splitting", "chain": chain.id,
                          "parts_total": 0, "parts_done": 0, "part_index": 0})
         job.save()
@@ -1103,6 +1302,9 @@ class App:
             return
         self.install_menu(chat_id)          # первый ответ в чате — заодно и меню
 
+        if text and not text.startswith("/") and str(chat_id) in getattr(self, "awaiting_key", {}):
+            self.accept_llm_key(chat_id, text, message.get("message_id"))
+            return
         if text and not text.startswith("/") and self.colab.awaiting_code():
             # Код авторизации принимаем при любом открытом входе (и после /login в чате, и после
             # кнопки «войти» на странице). Но не всякий текст — иначе обычная фраза ломала вход.
@@ -1188,6 +1390,26 @@ class App:
             self.show_usage(chat_id)
         elif data == "profiles":
             self.show_profiles(chat_id)
+        elif data == "voices":
+            self.show_voices(chat_id)
+        elif data == "voices_toggle":
+            turned = "one" if self.settings.voices == "multi" else "multi"
+            self.settings.change(voices=turned)
+            self.show_voices(chat_id, "Многоголосая озвучка " + ("включена." if turned == "multi" else "выключена."))
+        elif data.startswith("llm_provider:"):
+            provider = data.partition(":")[2]
+            if provider in llm.PROVIDERS:
+                self.settings.change(llm_provider=provider)
+            self.show_voices(chat_id, f"Поставщик LLM: {llm.PROVIDERS.get(provider, provider)}.")
+        elif data == "llm_key":
+            self.awaiting_key[str(chat_id)] = self.settings.llm_provider
+            self.bot.send(chat_id, f"Пришлите ключ {llm.PROVIDERS[self.settings.llm_provider]} следующим "
+                                   f"сообщением — сохраню его и удалю сообщение из переписки.")
+        elif data == "llm_models":
+            self.show_models(chat_id)
+        elif data.startswith("llm_model:"):
+            self.settings.change(llm_model=data.partition(":")[2])
+            self.show_voices(chat_id, f"Модель: {self.settings.llm_model}.")
         elif data == "profile_add":
             self.show_profiles(chat_id, self.profile_action("add"))
         elif data.startswith("profile_login:"):
@@ -1284,6 +1506,8 @@ class App:
             self.do_action(chat_id, "eta")
         elif head == "/usage":
             self.show_usage(chat_id)
+        elif head in ("/voices", "/llm"):
+            self.show_voices(chat_id)
         elif head in ("/profiles", "/profile"):
             if argument.isdigit():
                 self.show_profiles(chat_id, self.profile_action("activate", int(argument)))
@@ -1303,6 +1527,7 @@ class App:
         chains_now = [job for job in jobs if job.status in ("splitting", "waiting", "gluing")]
         asking = [job for job in jobs if job.status == "choice"]
         paused = [job for job in jobs if job.status == "paused"]
+        casting = [job for job in jobs if job.status == "casting"]
         lines = []
         for job in running:
             minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
@@ -1315,13 +1540,15 @@ class App:
             lines.append(f"✂️ {job.meta['name']} — {where}{note}")
         for job in queued:
             lines.append(f"⏳ {job.meta['name']} — в очереди")
+        for job in casting:
+            lines.append(f"🎭 {job.meta['name']} — первая машина: разметка ролей и голоса героев")
         for job in paused:
             lines.append(f"⏸ {job.meta['name']} — {job.meta.get('note') or 'пауза'}"[:200])
         for job in asking:
             lines.append(f"❓ {job.meta['name']} — ≈{float(job.meta.get('hours_estimate') or 0):.1f} ч, "
                          f"ждёт ответа: резать на части или одним файлом")
         head = (f"Сейчас: {len(running) + len(chains_now)} в работе, {len(queued)} в очереди.")
-        if not running and not queued and not chains_now and not asking:
+        if not running and not queued and not chains_now and not asking and not casting:
             head = "Свободно: ничего не собирается."
         if self.profiles.enabled:
             head += f"\nGoogle Colab: {self.profile_label()}."
@@ -1654,6 +1881,9 @@ class App:
                 job.meta["chat_id"] = owner
                 job.save()
         try:
+            if job.meta.get("cast"):
+                self.start_cast(job, book)        # первая машина многоголосой книги
+                return
             # Часть книги идёт на машину ТОЛЬКО на синтез: сырьё вернётся в том, а громкость, музыка
             # и сборка будут здесь. Книга целиком в режиме частей машину не занимает вовсе.
             if job.meta.get("part_index") and job.meta.get("chain"):
@@ -1662,16 +1892,22 @@ class App:
                     raise RuntimeError("книга с частями больше не найдена — начните её заново")
                 job.log_line(self.parts_line(chain, job.meta["part_index"]))
                 self.announce_profile(job)
+                pack = chain.meta.get("voice_pack")
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
-                                       "--parts-dir", str(self.parts_dir(chain))])
+                                       "--parts-dir", str(self.parts_dir(chain))]
+                                + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else []))
                 return
+            pack = self.voice_pack_for(job, book)
+            if pack is self.WAITING:
+                return                            # сначала голоса: озвучка — после первой машины
+            voices_extra = ["--voice-pack", str(pack)] if pack else []
             split = job.meta.get("split")
             if split == "whole":
                 # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
                 job.log_line("режим: одна книга целиком — так решили на вопрос «резать ли»")
                 self.announce_profile(job)
-                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0)
+                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0, extra=voices_extra)
                 return
             if (split == "parts" or self.settings.mode == bot_settings.MODE_PARTS) \
                     and not job.meta.get("part_index"):
@@ -1679,7 +1915,7 @@ class App:
                 return
             job.log_line(self.settings.job_line())
             self.announce_profile(job)
-            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS)
+            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS, extra=voices_extra)
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
             job.save()
@@ -1806,7 +2042,8 @@ def main() -> int:
                           ask_split=app.ask_split, choose_split=app.choose_split,
                           retry_part=app.retry_part, profiles=app.profiles,
                           profile_action=app.profile_action, resume=app.resume_job,
-                          profile_label=app.profile_label)
+                          profile_label=app.profile_label, voice_packs=app.voice_packs,
+                          refresh_models=app.refresh_models)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "

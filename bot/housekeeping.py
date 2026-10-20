@@ -9,6 +9,7 @@
                           вместе с сырьём частей /data/parts/<id>;
   /data/parts/<id>        сырьё частей ГОТОВОЙ книги — через RAW_DONE_DAYS: книга уже собрана,
                           а сырьё — гигабайты;
+  /data/voices/<книга>    пакеты голосов многоголосых книг — последние VOICE_PACKS_KEEP (5) книг;
   /data/results, books    архивы и книги старше срока — удаляются; книги, которые сейчас в работе, —
                           никогда;
   ~/.config/colab-*       журнал CLI colab.log (пишет отладку HTTP при каждом вызове) обрезается до
@@ -30,7 +31,8 @@ CLI_LOG_KEEP = 1024 * 1024
 RAW_DONE_DAYS = 1                      # сырьё частей собранной книги
 DAY = 24 * 3600
 
-LIVE_JOBS = {"running", "queued", "choice", "splitting", "waiting", "gluing", "held", "paused"}
+LIVE_JOBS = {"running", "queued", "choice", "splitting", "waiting", "gluing", "held", "paused", "casting"}
+VOICE_PACKS_KEEP = 5                   # пакеты голосов: последние пять книг (повтор и части берут готовые)
 LIVE_CHAINS = {"split", "running", "gluing"}
 
 
@@ -76,7 +78,7 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
     limit = max(1.0, float(keep_days)) * DAY
     data, config = pathlib.Path(data), pathlib.Path(config)
     done = {"заданий": 0, "журналов обрезано": 0, "книг по частям": 0, "сырья частей": 0,
-            "архивов": 0, "книг": 0, "файлов CLI": 0}
+            "архивов": 0, "книг": 0, "файлов CLI": 0, "пакетов голосов": 0}
 
     # ── задания ──
     in_use = set()
@@ -121,6 +123,26 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
             if folder.name not in known and folder.name not in live_chains and _age(folder, now) > limit:
                 if _remove(folder):
                     done["сырья частей"] += 1
+
+    # ── пакеты голосов: последние VOICE_PACKS_KEEP книг; книги в работе не трогаем никогда ──
+    voices_root = data / "voices"
+    if voices_root.is_dir():
+        busy = set()
+        for job in jobs.load():
+            if job.status in LIVE_JOBS:
+                if job.meta.get("pack_dir"):
+                    busy.add(pathlib.Path(job.meta["pack_dir"]).name)
+                if job.meta.get("voice_pack"):
+                    busy.add(pathlib.Path(job.meta["voice_pack"]).parent.name)
+        for chain in chains.load():
+            if chain.status in LIVE_CHAINS | {"failed"} and chain.meta.get("voice_pack"):
+                busy.add(pathlib.Path(chain.meta["voice_pack"]).parent.name)
+        folders = [f for f in voices_root.iterdir() if f.is_dir()]
+        folders.sort(key=lambda f: max([item.stat().st_mtime for item in f.rglob("*")] or [f.stat().st_mtime]),
+                     reverse=True)
+        for folder in folders[VOICE_PACKS_KEEP:]:
+            if folder.name not in busy and _remove(folder):
+                done["пакетов голосов"] += 1
 
     # ── архивы и книги ──
     for folder, key in ((data / "results", "архивов"), (data / "books", "книг")):

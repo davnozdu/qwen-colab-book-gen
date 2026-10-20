@@ -135,6 +135,27 @@ class Bot:
         return result if isinstance(result, list) else []
 
     # ────────────────────────────── файлы ──────────────────────────────
+    def send_audio(self, chat_id, path: pathlib.Path, caption: str = "", title: str = "") -> bool:
+        """Аудиофайл в чат (образец голоса героя): multipart/form-data, как требует Bot API."""
+        path = pathlib.Path(path)
+        boundary = "----qwenbook" + os.urandom(8).hex()
+        fields = {"chat_id": str(chat_id), "caption": caption[:1000], "title": title[:60] or path.stem}
+        body = bytearray()
+        for name, value in fields.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                     f"{value}\r\n").encode("utf-8")
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; "
+                 f"filename=\"{path.name}\"\r\nContent-Type: audio/wav\r\n\r\n").encode("utf-8")
+        body += path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(API.format(token=self.token, method="sendAudio"), data=bytes(body),
+                                         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                return bool(json.load(response).get("ok"))
+        except Exception as exc:
+            print(f"[tg] аудио {path.name} не ушло в {chat_id}: {exc}", flush=True)
+            return False
+
     def download(self, file_id: str, target: pathlib.Path) -> int:
         info = self.call("getFile", {"file_id": file_id})
         size = int(info.get("file_size") or 0)

@@ -208,6 +208,8 @@ echo "--- проверяю режим частей (нарезка ботом, �
 if ! python3 "$HERE/check_chain.py" "http://127.0.0.1:${WEB_BASE_PORT:-$WEB_PORT}" "$WORK"; then fail=1; fi
 echo "--- режим частей в Telegram: вопрос «резать?», кнопки у частей, остановка цепочки ---"
 if ! python3 "$HERE/check_parts_telegram.py"; then fail=1; fi
+echo "--- многоголосая книга: LLM, голоса, пакет, один голос без ключа ---"
+if ! python3 "$HERE/check_voices.py"; then fail=1; fi
 echo "--- уборка томов: старое удаляется, журналы не растут ---"
 if ! python3 "$HERE/check_housekeeping.py"; then fail=1; fi
 echo "--- профили Google Colab: переключение, сбои, пауза ---"

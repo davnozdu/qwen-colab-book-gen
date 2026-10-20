@@ -57,9 +57,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        payload = urllib.parse.parse_qs(self.rfile.read(length).decode())
-        flat = {key: value[0] for key, value in payload.items()}
+        raw = self.rfile.read(length)
         method = self.path.rsplit("/", 1)[-1]
+        if "multipart/form-data" in (self.headers.get("Content-Type") or ""):
+            # Файл (образец голоса): записываем, что ушло, без самих байтов звука.
+            fields = dict(re.findall(rb'name="(chat_id|caption|title)"\r\n\r\n(.*?)\r\n', raw, re.S))
+            line = json.dumps({"chat_id": fields.get(b"chat_id", b"").decode(), "method": method,
+                               "text": "[audio] " + fields.get(b"caption", b"").decode("utf-8", "replace"),
+                               "buttons": ""}, ensure_ascii=False)
+            with (STATE / "sent.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            return self._json({"ok": True, "result": {"message_id": 2}})
+        payload = urllib.parse.parse_qs(raw.decode())
+        flat = {key: value[0] for key, value in payload.items()}
 
         if method == "_push":
             # Тест кладёт обновление сюда: пишет только заглушка, гонок за файл нет.

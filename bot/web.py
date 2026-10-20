@@ -185,7 +185,8 @@ class WebApp:
     def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
                  notify=None, settings=None, chains=None, continue_chain=None, glue=None,
                  ask_split=None, choose_split=None, retry_part=None, profiles=None,
-                 profile_action=None, resume=None, profile_label=None):
+                 profile_action=None, resume=None, profile_label=None, voice_packs=None,
+                 refresh_models=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -211,6 +212,9 @@ class WebApp:
         self.profiles = profiles
         self.profile_action = profile_action or (lambda action, number=0: "Профили недоступны в этой сборке.")
         self.profile_label = profile_label or (lambda number=0: "")
+        # Многоголосая книга: пакеты голосов (послушать образцы) и «считать модели» LLM.
+        self.voice_packs = voice_packs
+        self.refresh_models = refresh_models or (lambda: "Список моделей недоступен в этой сборке.")
         # «Продолжить» книгу на паузе: круг по профилям заново.
         self.resume = resume or (lambda job_id: "Продолжение недоступно в этой сборке.")
         self.last_message = ""
@@ -278,6 +282,17 @@ class WebApp:
             if "raw" in query or query.get("raw"):
                 return 200, "text/plain; charset=utf-8", job.tail(200_000).encode(), {}
             return self.html(self.shell(self.log_page(job)))
+        if method == "GET" and parsed.path.startswith("/voice/"):
+            pieces = parsed.path.strip("/").split("/")
+            sample = (self.voice_packs.sample(pieces[1], pieces[2].removesuffix(".wav"))
+                      if self.voice_packs is not None and len(pieces) == 3 else None)
+            if sample is None:
+                return 404, "text/plain; charset=utf-8", "образца нет".encode(), {}
+            return 200, "audio/wav", sample, {}
+        if method == "POST" and where == "/llm/models":
+            message = self.refresh_models()
+            self.notify("Модели LLM со страницы: " + message)
+            return self.redirect("/", message)
         if method == "GET" and parsed.path.startswith("/result/"):
             return self.send_file(self.jobs.results, path_las(parsed.path), "application/zip")
         if method == "GET" and parsed.path.startswith("/file/"):
@@ -447,7 +462,7 @@ class WebApp:
 </form>
 <div class="muted" style="margin-top:8px">Только EPUB. {self.mode_hint()} Одна книга за раз.</div>{hint}</div>"""
 
-        return upload + self.chains_card() + self.settings_card() + self.colab_card() \
+        return upload + self.chains_card() + self.voices_card() + self.settings_card() + self.colab_card() \
             + self.jobs_card() + self.files_card("books", "/") + self.files_card("results", "/")
 
     def param(self, name: str) -> str:
@@ -536,6 +551,56 @@ class WebApp:
                          f'{"".join(rows)}</table>{resume}{note}</div>')
         return "".join(cards)
 
+    def voices_fields(self) -> str:
+        """Многоголосая озвучка: режим, поставщик LLM, ключи (показываем только хвост) и модель."""
+        import llm
+        settings = self.settings
+        voices = "".join(f'<option value="{k}"{" selected" if k == settings.voices else ""}>{html.escape(v)}</option>'
+                         for k, v in bot_settings.VOICES.items())
+        providers = "".join(f'<option value="{k}"{" selected" if k == settings.llm_provider else ""}>'
+                            f'{html.escape(v)}</option>' for k, v in llm.PROVIDERS.items())
+        names = settings.models()
+        current = settings.llm_model
+        if current not in names:
+            names = [current] + names
+        models = "".join(f'<option value="{html.escape(n)}"{" selected" if n == current else ""}>{html.escape(n)}'
+                         f'</option>' for n in names)
+        keys = "".join(
+            f'<div style="margin-top:6px"><label>Ключ {html.escape(title)}</label> '
+            f'<input type="password" name="{provider}_key" autocomplete="off" style="width:18em" '
+            f'placeholder="{html.escape(llm.masked(settings.values.get(provider + "_key", "")) or "не задан")}"> '
+            f'<span class="muted">(пусто — оставить как есть)</span></div>'
+            for provider, title in llm.PROVIDERS.items())
+        return (f'<div style="margin-top:12px"><label>Озвучка</label><br><select name="voices">{voices}</select> '
+                f'<span class="muted">многоголосая: первая машина размечает роли через LLM и создаёт голоса '
+                f'героев, вторая озвучивает; рассказчик — прежний; без ключа LLM — один голос</span></div>'
+                f'<div style="margin-top:6px"><label>Поставщик LLM</label> <select name="llm_provider">{providers}'
+                f'</select> <label>модель</label> <select name="llm_model">{models}</select></div>{keys}')
+
+    def voices_card(self) -> str:
+        """Голоса последних многоголосых книг: герои и их образцы — послушать прямо здесь."""
+        if self.voice_packs is None:
+            return ""
+        cards = []
+        for pack in self.voice_packs.recent(3):
+            rows = []
+            for voice in pack["voices"]:
+                if voice["fixed"]:
+                    rows.append(f'<tr><td class="name">{html.escape(voice["name"])}</td><td>{voice["lines"]}</td>'
+                                f'<td class="muted">вшитый образец рассказчика</td></tr>')
+                    continue
+                player = (f'<audio controls preload="none" src="/voice/{pack["key"]}/{voice["id"]}.wav"></audio>'
+                          if voice["sample"] else '<span class="muted">образца нет</span>')
+                rows.append(f'<tr><td class="name">{html.escape(voice["name"])}'
+                            f'<div class="muted">{html.escape(voice["about"])}</div></td>'
+                            f'<td>{voice["lines"]}</td><td>{player}</td></tr>')
+            llm_line = " · ".join(str(v) for v in (pack["llm"].get("provider"), pack["llm"].get("model")) if v)
+            cards.append(f'<div class="card"><h2>Голоса: {html.escape(pack["title"])}</h2>'
+                         f'<div class="muted">разметка ролей: {html.escape(llm_line)}</div>'
+                         f'<table style="margin-top:8px"><tr><th>Роль</th><th>Реплик</th><th>Образец</th></tr>'
+                         f'{"".join(rows)}</table></div>')
+        return "".join(cards)
+
     def mode_hint(self) -> str:
         """Что будет с книгой при загрузке — словами, а не догадками по журналу."""
         if self.settings is None:
@@ -584,8 +649,12 @@ class WebApp:
                 f'<span class="muted">(старые задания и их журналы, книги по частям, архивы и книги '
                 f'удаляются сами; сырьё частей собранной книги — через сутки; журналы Colab CLI '
                 f'обрезаются)</span></div>'
+                f'{self.voices_fields()}'
                 f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
                 f'</form>'
+                f'<form method="post" action="/llm/models" style="margin-top:8px"><button class="ghost" '
+                f'type="submit" title="Запросить у поставщика список моделей по сохранённому ключу">'
+                f'считать модели</button></form>'
                 f'<div class="muted" style="margin-top:8px">Сейчас: '
                 f'{html.escape(self.settings.summary())}</div>{note}</div>')
 
@@ -594,7 +663,7 @@ class WebApp:
         meta = job.meta
         icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
                  "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸",
-                 "paused": "⏸"}
+                 "paused": "⏸", "casting": "🎭"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
@@ -888,7 +957,8 @@ class WebApp:
         """Книги, которые сейчас нельзя удалять: их собирают, режут, ждут или ждут ответа."""
         names = set()
         for job in self.jobs.load():
-            if job.status in ("running", "queued", "choice", "splitting", "waiting", "gluing", "held"):
+            if job.status in ("running", "queued", "choice", "splitting", "waiting", "gluing", "held",
+                              "casting", "paused"):
                 names.add(pathlib.Path(job.meta.get("book") or "").name)
         if self.chains is not None:
             for chain in self.chains.load():
