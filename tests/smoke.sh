@@ -82,7 +82,7 @@ else
         -e TELEGRAM_BOT_TOKEN=test -e TELEGRAM_API_BASE="http://qwen-mock:$PORT" \
         -e TELEGRAM_CHAT_ID="$CHAT" -e POLL_SECONDS=1 -e PIPELINE_DIR=/stub/pipeline \
         -e DATA_DIR=/data -e FAKE_SECONDS="${FAKE_SECONDS:-4}" -e HOME=/root \
-        -v "$HERE/pipeline:/stub/pipeline:ro" \
+        -v "$HERE/pipeline:/stub/pipeline:ro" -v "$HERE:/tests:ro" \
         -v "$WORK/data:/data" "$IMAGE" >/dev/null
     sleep 3
     # WEB_PORT не задаём: страница должна слушать 8090 — умолчание образа, как в README.
@@ -216,6 +216,10 @@ if ! python3 "$HERE/check_lists.py"; then fail=1; fi
 # Ничего не должно остаться работать: ни фонового окна, ни процесса сборки.
 # Даём пару секунд на завершение и не считаем зомби (они уже не работают).
 if [ "${RUN_LOCAL:-0}" != "1" ]; then
+    echo "--- настоящая нарезка книги в образе (без заглушек конвейера) ---"
+    if ! docker exec qwen-smoke python3 /tests/check_container_split.py /opt/qwen-epub-audiobook /tmp/split-check; then
+        fail=1
+    fi
     sleep 3
     if docker exec qwen-smoke sh -c 'tmux ls 2>/dev/null | grep -q .'; then
         echo "  ✗ осталась работающая сессия tmux"; fail=1

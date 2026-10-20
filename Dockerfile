@@ -29,9 +29,11 @@ RUN apt-get update \
 RUN pip install "google-colab-cli"
 
 # Библиотеки конвейера для работы В КОНТЕЙНЕРЕ (режим частей): нарезка книги и сборка epub
-# (ebooklib + lxml), громкость (soundfile + numpy), разбор предложений при сборке книги (razdel).
-# В скриптах конвейера они подключаются лениво, поэтому режим «одна книга целиком» работает и без них.
-RUN pip install "ebooklib" "lxml" "soundfile" "numpy" "razdel"
+# (ebooklib + lxml + beautifulsoup4 — текст книги читается через BeautifulSoup), громкость
+# (soundfile + numpy), разбор предложений при сборке книги (razdel). В скриптах конвейера они
+# подключаются лениво, поэтому режим «одна книга целиком» работает и без них — а нарезка без bs4
+# падала. Настоящую нарезку в образе проверяет tests/check_container_split.py.
+RUN pip install "ebooklib" "lxml" "beautifulsoup4" "soundfile" "numpy" "razdel"
 
 # Конвейер сборки аудиокниги (копию кладёт workflow из davnozdu/qwen-epub-audiobook).
 COPY vendor/qwen-epub-audiobook/ /opt/qwen-epub-audiobook/

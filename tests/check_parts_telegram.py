@@ -2,16 +2,16 @@
 """Режим частей в Telegram — то же, что на странице, без сети и без Colab.
 
 Проверяем на живом App (Telegram и запуск машины подменены):
-  1. длинная книга при включённом режиме частей — вопрос «резать?» с кнопками «да» / «нет»;
-     короткая книга и режим «целиком» — без вопроса;
-  2. «нет» — книга идёт одним файлом, машина её не режет (--max-hours 0); «да» — нарезка и части;
+  1. длинная книга при включённом режиме частей режется сразу, без вопроса (режим и порог — уже
+     ответ из админки); короткая книга и режим «целиком» не режутся;
+  2. задание, ждавшее ответа до обновления: «нет» — книга идёт одним файлом, машина её не режет (--max-hours 0); «да» — нарезка и части;
      повторное нажатие говорит «уже решено», а не запускает второй раз;
   3. готовая часть — «часть k из N готова» и что дальше; упавшая в первый раз — бот повторяет сам,
      без общего «не собралась»;
   4. упавшая дважды — цепочка стоит ПО-НАСТОЯЩЕМУ: следующие части не запускаются; в сообщении
      кнопки «повторить часть» / «нет» / «продолжить генерацию»; «повторить» поднимает цепочку;
   5. сбой сборки книги — ОДНО сообщение с кнопкой «собрать книгу», а не по сообщению на круг;
-  6. страница: «повторить» у части — повтор в цепочке, а не новая книга; вопрос «резать?» есть и там.
+  6. страница: «повторить» у части — повтор в цепочке, а не новая книга; кнопки ждавшей ответа книги есть и там.
 """
 import os
 import pathlib
@@ -102,26 +102,41 @@ def said(messages, *needles) -> bool:
 long_book = make_epub(work / "long.epub", 40000)        # ≈0.8 ч при 14 знаках в секунду
 short_book = make_epub(work / "short.epub", 3000)
 
-# ── 1. вопрос «резать?» ─────────────────────────────────────────────────────
+# ── 1. режим частей в настройках — режем без вопроса ───────────────────────
 app.settings.update({"mode": "parts", "parts_hours": "0.5", "drive": "on"})
-job = app.jobs.add("long.epub", CHAT, long_book)
+auto = app.jobs.add("long.epub", CHAT, long_book)
 app.bot.sent = []
-asked = app.ask_split(job, long_book)
-question = app.bot.sent
-check("длинная книга: бот спрашивает, резать ли её", asked and said(question, "длинная", "Резать на части"),
-      str(question))
-check("в вопросе две кнопки: «да, резать» и «нет, одним файлом»",
-      any(f"cut:{job.id}" in markup and f"whole:{job.id}" in markup for _, markup in question))
-check("пока ответа нет, книга машину не занимает и в очередь не встаёт",
-      app.jobs.by_id(job.id).status == "choice" and not started)
-check("ждущая ответа книга видна в «Статусе» вместе с кнопками",
-      said(press("status"), "ждёт ответа") and any(f"cut:{job.id}" in markup for _, markup in app.bot.sent))
+asked = app.ask_split(auto, long_book)
+check("длинная книга при режиме частей: бот не спрашивает, а сразу режет",
+      not asked and app.jobs.by_id(auto.id).meta.get("split") == "parts"
+      and said(app.bot.sent, "Режу на части", "в настройках")
+      and not any("whole:" in markup for _, markup in app.bot.sent), str(app.bot.sent))
+app.launch(app.jobs.by_id(auto.id))
+auto_chain = app.chains.by_id(app.jobs.by_id(auto.id).meta.get("chain") or "")
+check("и запуск сразу режет её на части — как после ответа «да»",
+      auto_chain is not None and len(auto_chain.parts) == 2, str(app.jobs.by_id(auto.id).meta))
 short_job = app.jobs.add("short.epub", CHAT, short_book)
-check("короткая книга идёт без вопроса", not app.ask_split(short_job, short_book))
+check("короткая книга идёт как есть", not app.ask_split(short_job, short_book)
+      and not app.jobs.by_id(short_job.id).meta.get("split"))
 app.settings.update({"mode": "book", "parts_hours": "0.5", "drive": "on"})
 other = app.jobs.add("long2.epub", CHAT, long_book)
-check("в режиме «целиком» вопроса нет — режим частей выключен в админке", not app.ask_split(other, long_book))
+check("в режиме «целиком» книга не режется", not app.ask_split(other, long_book)
+      and not app.jobs.by_id(other.id).meta.get("split"))
 app.settings.update({"mode": "parts", "parts_hours": "0.5", "drive": "on"})
+
+
+def waiting_answer(book):
+    """Задание, которое ждало ответа «резать ли» ещё до обновления: кнопки должны его решать."""
+    item = app.jobs.add("long.epub", CHAT, book)
+    item.meta.update({"status": "choice", "hours_estimate": 0.8,
+                      "note": "ждёт ответа: резать на части или одним файлом"})
+    item.save()
+    return item
+
+
+job = waiting_answer(long_book)
+check("ждавшая ответа книга видна в «Статусе» вместе с кнопками",
+      said(press("status"), "ждёт ответа") and any(f"cut:{job.id}" in markup for _, markup in app.bot.sent))
 
 # ── 2. ответы ───────────────────────────────────────────────────────────────
 answer = press(f"whole:{job.id}")
@@ -131,8 +146,7 @@ check("и машина её не режет: --max-hours 0",
 check("повторное нажатие не запускает второй раз", said(press(f"whole:{job.id}"), "уже решено")
       and len([s for s in started if s["job"] == job.id]) == 1)
 
-cut_job = app.jobs.add("long.epub", CHAT, long_book)
-app.ask_split(cut_job, long_book)
+cut_job = waiting_answer(long_book)
 answer = press(f"cut:{cut_job.id}")
 chain = app.chains.by_id(app.jobs.by_id(cut_job.id).meta.get("chain") or "")
 check("«да» — книга режется на части", said(answer, "режу на части") and chain is not None
@@ -242,8 +256,7 @@ page.route("POST", f"/repeat/{lone.meta['session']}")
 check("страница: «повторить» у части — повтор в цепочке, а не новая книга",
       len(app.jobs.load()) == before and app.jobs.by_id(lone.id).status == "queued",
       f"заданий было {before}, стало {len(app.jobs.load())}")
-asking = app.jobs.add("long.epub", CHAT, long_book)
-app.ask_split(asking, long_book)
+asking = waiting_answer(long_book)
 # Строку именно этого задания: в списке по 10 оно может оказаться и на второй странице.
 html_page = page.job_row(app.jobs.by_id(asking.id))
 check("страница: у ждущей книги те же две кнопки", f"/choice/{asking.meta['session']}/cut" in html_page
@@ -307,6 +320,29 @@ real.refresh()
 check("и не падает с «архива нет», пока идёт", real.by_id(local_job.id).status == "running")
 __import__("time").sleep(4)
 check("а когда процесс закончился — завершается", not real.alive(real.by_id(local_job.id)))
+
+# ── 9. нарезка не удалась: причина в журнале задания и в сообщении ─────────
+def broken_shrink(python, pipeline, book, out, hours, log, env=None):
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("собираю манифест (CPU, без GPU)…\nTraceback (most recent call last):\n"
+                   "  File \"prepare_qwen.py\", line 52, in read_source\n"
+                   "ModuleNotFoundError: No module named 'bs4'\n", encoding="utf-8")
+    return 1, {}
+
+
+real_shrink, chains_mod.shrink_step = chains_mod.shrink_step, broken_shrink
+split_job = app.jobs.add("broken.epub", CHAT, long_book)
+broken_chain = app.chains.create(long_book, "Сломанная", CHAT, 0.5)
+broken_chain.meta["job"] = split_job.id
+broken_chain.save()
+app.bot.sent = []
+app.split_chain(broken_chain, split_job)
+chains_mod.shrink_step = real_shrink
+check("сбой нарезки: причина в сообщении Telegram", said(app.bot.sent, "не удалась", "No module named 'bs4'"),
+      str(app.bot.sent))
+check("и конец журнала нарезки — в журнале задания (его показывает кнопка «журнал»)",
+      "No module named 'bs4'" in app.jobs.by_id(split_job.id).tail()
+      and "bs4" in app.jobs.by_id(split_job.id).meta["note"])
 
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")

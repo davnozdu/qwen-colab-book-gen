@@ -684,14 +684,22 @@ class App:
         code, plan = chains.shrink_step(sys.executable, PIPELINE, pathlib.Path(chain.meta["book"]),
                                         chain.out, chain.parts_hours, chain.log, env=self.jobs.env)
         if code != 0 or not plan:
+            # Ход нарезки пишется в журнал цепочки, а кнопка «журнал» показывает журнал задания:
+            # переносим туда конец вывода нарезки, а причину (последнюю строку ошибки) — в сообщение.
+            lines = [line.rstrip() for line in chain.tail(6000).splitlines() if line.strip()]
+            cause = next((line.strip() for line in reversed(lines)
+                          if re.search(r"(Error|Exception|ошибк|не удалось)", line)), "")
+            job.log_line(f"нарезка не удалась (код {code}); конец журнала нарезки:")
+            job.log_line("\n".join(lines[-30:]) or "журнал нарезки пуст")
+            reason = "нарезка на части не удалась" + (f": {cause[:200]}" if cause else "")
             chain.meta["status"] = chains.FAILED
-            chain.meta["note"] = "нарезка не удалась — смотрите журнал нарезки"
+            chain.meta["note"] = reason
             chain.save()
-            job.meta.update({"status": "failed", "finished": time.time(),
-                             "note": "нарезка на части не удалась: смотрите журнал"})
+            job.meta.update({"status": "failed", "finished": time.time(), "note": reason})
             job.save()
-            self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: нарезка на части не удалась. "
-                                       f"Журнал — на странице, кнопка «журнал».",
+            self.send_to_job_chat(job, f"⚠️ «{job.meta['name']}»: нарезка на части не удалась."
+                                       + (f"\nПричина: {cause[:300]}" if cause else "")
+                                       + "\nКонец журнала нарезки — в журнале задания (кнопка «журнал»).",
                                   buttons=[[("▶️ Нарезать заново", f"chain_continue:{chain.id}"),
                                             ("✖️ Не надо", "menu")]])
             return
@@ -1553,11 +1561,13 @@ class App:
         self.launch(job)
 
     def ask_split(self, job, book: pathlib.Path) -> bool:
-        """Длинная книга при включённом режиме частей: спрашиваем, резать ли её.
+        """Длинная книга при включённом режиме частей: режем сразу, без вопроса.
 
-        Режим частей включается в админке; порог — там же. Книга длиннее порога ждёт ответа и
-        машину не занимает: «да» — режем и идём по частям, «нет» — одним файлом, одним прогоном.
-        Возвращает True, если вопрос задан (запуск — после ответа).
+        Режим частей и порог выбираются в админке — это и есть ответ на «резать ли», поэтому
+        переспрашивать при каждой книге (и при «повторить») не нужно. Короткая книга и режим
+        «целиком» ничего не меняют. Возвращает True, если запуск надо отложить до ответа; теперь
+        такого не бывает — False всегда, но задания, ждавшие ответа до обновления, кнопки
+        «резать / одним файлом» по-прежнему решают (choose_split).
         """
         if self.settings.mode != bot_settings.MODE_PARTS:
             return False
@@ -1566,19 +1576,16 @@ class App:
         if hours <= limit:
             return False
         count = max(2, int(-(-hours // limit)))
-        job.meta.update({"status": "choice", "hours_estimate": round(hours, 2),
-                         "note": "ждёт ответа: резать на части или одним файлом"})
+        job.meta.update({"split": "parts", "hours_estimate": round(hours, 2)})
         job.save()
-        job.log_line(f"книга длинная (≈{hours:.1f} ч звука, порог {limit:g} ч) — спрашиваю, резать ли")
+        job.log_line(f"книга длинная (≈{hours:.1f} ч звука, порог {limit:g} ч) — режу на части: "
+                     f"так задано в настройках")
         self.send_to_job_chat(
             job,
-            f"📚 «{job.meta['name']}» длинная: ≈{hours:.1f} ч звука (порог {limit:g} ч).\n\n"
-            f"Резать на части по {limit:g} ч? Получится ≈{count} частей: они озвучатся по одной, "
-            f"каждая придёт архивом, а книга целиком соберётся в конце — здесь, без облака.\n\n"
-            f"Если не резать — книга пойдёт одним файлом, одним прогоном машины (на длинной книге "
-            f"прогон может не дойти до конца).",
-            buttons=[[("✂️ Да, резать", f"cut:{job.id}"), ("📄 Нет, одним файлом", f"whole:{job.id}")]])
-        return True
+            f"✂️ «{job.meta['name']}» длинная: ≈{hours:.1f} ч звука. Режу на части по {limit:g} ч "
+            f"(≈{count}) — так задано в настройках. Части озвучатся по одной, книга целиком соберётся "
+            f"в конце.")
+        return False
 
     def choose_split(self, job_id: str, cut: bool) -> str:
         """Ответ на «резать ли»: из Telegram и со страницы — одно место."""
