@@ -1070,7 +1070,8 @@ class App:
             rows.append([("🔁 Повторить часть", f"part_retry:{part_job.id}"),
                          ("✖️ Нет", "menu")])
             rows.append([("📜 Журнал части", f"log:{part_job.meta.get('session') or part_job.id}")])
-        rows.append([("▶️ Продолжить генерацию", f"chain_continue:{chain.id}")])
+        rows.append([("▶️ Продолжить генерацию", f"chain_continue:{chain.id}"),
+                     ("🔄 Вся книга заново", f"chain_restart:{chain.id}")])
         return rows
 
     def retry_part(self, job_id: str) -> str:
@@ -1219,6 +1220,35 @@ class App:
             chain.meta["job"] = job.id
         self.start_glue(chain, job)
         return f"Собираю «{chain.meta.get('name')}» из готовых частей — журнал у строки сборки."
+
+    def restart_book(self, chain_id: str, chat_id: str = "") -> str:
+        """«Вся книга заново»: всё, что идёт по книге, останавливается, старая нарезка уходит в
+        заменённые, книга начинается с нуля — новая нарезка, все части. Готовый пакет голосов
+        (многоголосая книга) берётся повторно: разметка LLM та же книга, тот же хеш."""
+        chain = self.chains.by_id(chain_id)
+        if chain is None:
+            return "Такой книги с частями уже нет."
+        book = pathlib.Path(chain.meta.get("book") or "")
+        if not book.is_file():
+            return f"Файла «{book.name}» больше нет в томе — пришлите книгу заново."
+        parent = self.jobs.by_id(chain.meta.get("job") or "")
+        others = [self.jobs.by_id(part.get("job_id") or "") for part in chain.parts]
+        final = self.jobs.by_id(str(chain.meta.get("final_job") or "")) if chain.meta.get("final_job") else None
+        for item in [parent, final] + others:
+            if item is not None and item.status in ("running", "queued", "splitting", "waiting", "gluing",
+                                                    "held", "paused", "casting"):
+                self.jobs.stop(item)
+                item.meta.update({"status": "stopped", "finished": time.time(),
+                                  "note": "остановлено: книга начата заново"})
+                item.save()
+        chain.meta.update({"status": chains.REPLACED, "note": "книга начата заново"})
+        chain.save()
+        name = (parent.meta.get("name") if parent else "") or chain.meta.get("name") or book.name
+        chat = (parent.meta.get("chat_id") if parent else "") or chat_id or self.owner_chat()
+        fresh = self.jobs.add(name, chat, book)
+        fresh.log_line(f"книга начата заново (прежняя нарезка {chain.id} заменена)")
+        self.launch(fresh)
+        return f"🔄 «{name}»: начинаю всю книгу заново — новая нарезка и все части."
 
     def continue_chain(self, chain_id: str, keep_tried: bool = False) -> str:
         """Кнопка «продолжить генерацию»: с первой неготовой части, готовые не трогаем.
@@ -1446,6 +1476,13 @@ class App:
             self.bot.send(chat_id, self.choose_split(job_id, action == "cut"))
         elif data.startswith("part_retry:"):           # упавшая часть книги: повторить именно её
             self.bot.send(chat_id, self.retry_part(data.partition(":")[2]))
+        elif data.startswith("chain_restart:"):        # «вся книга заново»: с подтверждением
+            self.bot.send(chat_id, "Начать всю книгу заново? Всё, что идёт по ней, остановится, части "
+                                   "озвучатся снова с новой нарезки.",
+                          buttons=[[("🔄 Да, заново", f"chain_restart_do:{data.partition(':')[2]}"),
+                                    ("↩️ Отмена", "menu")]])
+        elif data.startswith("chain_restart_do:"):
+            self.bot.send(chat_id, self.restart_book(data.partition(":")[2], str(chat_id)))
         elif data.startswith("chain_continue:"):       # «продолжить генерацию», как на странице
             self.bot.send(chat_id, self.continue_chain(data.partition(":")[2]))
         elif data.startswith("chain_glue:"):           # «собрать книгу», как на странице
@@ -1700,6 +1737,9 @@ class App:
             return
         if job.meta.get("chain") and job.meta.get("part_index"):
             self.bot.send(chat_id, self.retry_part(job.id))     # часть книги — повтор в своей цепочке
+            return
+        if job.meta.get("chain"):                               # книга по частям — вся заново
+            self.bot.send(chat_id, self.restart_book(job.meta["chain"], str(chat_id)))
             return
         book = pathlib.Path(job.meta.get("book") or "")
         if not book.is_file():
@@ -2043,7 +2083,7 @@ def main() -> int:
                           retry_part=app.retry_part, profiles=app.profiles,
                           profile_action=app.profile_action, resume=app.resume_job,
                           profile_label=app.profile_label, voice_packs=app.voice_packs,
-                          refresh_models=app.refresh_models)
+                          refresh_models=app.refresh_models, restart_book=app.restart_book)
         web.start_server(page, "0.0.0.0", port)
         outside = os.environ.get("WEB_OUTSIDE_PORT", str(port))
         print(f"[bot] страница слушает 0.0.0.0:{port} внутри контейнера; снаружи открывайте "

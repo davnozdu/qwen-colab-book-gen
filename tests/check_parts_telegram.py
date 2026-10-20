@@ -376,6 +376,45 @@ check("на странице — последние пять книг, гото�
       len(recent) == 5 and len({c.meta["book"] for c in recent}) == 5
       and page.chains_card().count("Книга по частям") == 5)
 
+# ── 11. «вся книга заново» после остановки ──────────────────────────────────
+whole_book = make_epub(work / "whole.epub", 40000)
+__import__("time").sleep(1.1)                                   # плашки — пять самых новых книг
+page.restart_book = app.restart_book
+stopped_parent = app.jobs.add("whole.epub", CHAT, whole_book)
+old_whole = app.chains.create(whole_book, "Целиком", CHAT, 0.5)
+old_whole.meta["job"] = stopped_parent.id
+old_whole.set_parts([{"index": i, "total": 2, "title": f"Целиком — часть {i} из 2", "epub": str(whole_book),
+                      "hours": 0.3} for i in (1, 2)])
+stopped_parts = []
+for part in old_whole.parts:
+    item = app.jobs.add(part["title"], CHAT, whole_book)
+    item.meta.update({"chain": old_whole.id, "part_index": part["index"], "status": "stopped",
+                      "note": "остановлено вручную"})
+    item.save()
+    part["job_id"], part["status"] = item.id, "stopped"
+    stopped_parts.append(item)
+old_whole.meta["status"] = "stopped"
+old_whole.save()
+stopped_parent.meta.update({"status": "stopped", "chain": old_whole.id})
+stopped_parent.save()
+row = page.job_row(app.jobs.by_id(stopped_parts[1].id))
+check("у остановленной части — и «повторить часть», и «вся книга заново»",
+      "повторить часть" in row and f"/chain/restart/{old_whole.id}" in row, row[-400:])
+check("на плашке книги — «вся книга заново»", f"/chain/restart/{old_whole.id}" in page.chains_card())
+before = {job.id for job in app.jobs.load()}
+page.route("POST", f"/chain/restart/{old_whole.id}")
+fresh_jobs = [job for job in app.jobs.load() if job.id not in before]
+fresh_chain = app.chains.by_id(fresh_jobs[0].meta.get("chain") or "") if fresh_jobs else None
+check("книга начата заново: прежняя нарезка заменена, новая — с нуля, все части",
+      app.chains.by_id(old_whole.id).status == chains_mod.REPLACED and fresh_chain is not None
+      and fresh_chain.id != old_whole.id and len(fresh_chain.parts) == 2
+      and all(part.get("status") != "done" for part in fresh_chain.parts),
+      str([j.meta for j in fresh_jobs][:1]))
+app.bot.sent = []
+app.repeat_job(CHAT, stopped_parent.meta["session"])
+check("«повторить» у самой книги по частям — тоже вся книга заново", said(app.bot.sent, "всю книгу заново"),
+      str(app.bot.sent))
+
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
 sys.exit(1 if bad else 0)

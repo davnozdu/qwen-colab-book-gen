@@ -186,7 +186,7 @@ class WebApp:
                  notify=None, settings=None, chains=None, continue_chain=None, glue=None,
                  ask_split=None, choose_split=None, retry_part=None, profiles=None,
                  profile_action=None, resume=None, profile_label=None, voice_packs=None,
-                 refresh_models=None):
+                 refresh_models=None, restart_book=None):
         self.jobs = jobs
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
@@ -215,6 +215,8 @@ class WebApp:
         # Многоголосая книга: пакеты голосов (послушать образцы) и «считать модели» LLM.
         self.voice_packs = voice_packs
         self.refresh_models = refresh_models or (lambda: "Список моделей недоступен в этой сборке.")
+        # «Вся книга заново» для книги по частям: новая нарезка и все части с нуля.
+        self.restart_book = restart_book or (lambda chain_id, chat_id="": "Недоступно в этой сборке.")
         # «Продолжить» книгу на паузе: круг по профилям заново.
         self.resume = resume or (lambda job_id: "Продолжение недоступно в этой сборке.")
         self.last_message = ""
@@ -316,6 +318,10 @@ class WebApp:
                 message = self.retry_part(job.id)
                 self.notify("Повтор части со страницы. " + message)
                 return self.redirect("/", message)
+            if job.meta.get("chain"):                      # книга по частям — вся заново
+                message = self.restart_book(job.meta["chain"])
+                self.notify("Со страницы: " + message)
+                return self.redirect("/", message)
             book = pathlib.Path(job.meta.get("book") or "")
             if not book.is_file():
                 return self.redirect("/", f"Файла «{book.name}» больше нет в папке — пришлите книгу заново.")
@@ -390,6 +396,10 @@ class WebApp:
             message = self.glue(chain)
             self.last_message = message
             self.notify(f"Сборка книги со страницы: {message}")
+            return self.redirect("/", message)
+        if method == "POST" and parsed.path.startswith("/chain/restart/"):
+            message = self.restart_book(path_las(parsed.path))
+            self.notify("Со страницы: " + message)
             return self.redirect("/", message)
         if method == "POST" and parsed.path.startswith("/chain/continue/"):
             chain = path_las(parsed.path)
@@ -529,10 +539,13 @@ class WebApp:
             note = ""
             if chain.meta.get("note"):
                 note = f'<div class="note" style="margin-top:8px">{html.escape(chain.meta["note"])}</div>'
-            resume = ""
+            resume = ('<form class="inline" method="post" action="/chain/restart/' + chain.id + '" '
+                      "onsubmit=\"return confirm('Начать всю книгу заново: новая нарезка и все части?')\""
+                      '><button class="ghost" type="submit" title="Остановить всё по книге и озвучить её '
+                      'целиком заново">вся книга заново</button></form>')
             if chain.status != "done":
-                resume = ('<form class="inline" method="post" action="/chain/continue/'
-                          + chain.id + '"><button type="submit" title="Продолжить с первой неготовой '
+                resume += ('<form class="inline" method="post" action="/chain/continue/'
+                           + chain.id + '"><button type="submit" title="Продолжить с первой неготовой '
                           'части: готовые не трогаем">продолжить генерацию</button></form>')
                 ready = [part for part in chain.parts if part.get("status") == "done"]
                 if chain.parts and len(ready) == len(chain.parts) and chain.status != "gluing":
@@ -727,9 +740,17 @@ class WebApp:
                            f'<button class="ghost" type="submit" title="Остановить книгу вместе с '
                            f'частями">остановить</button></form>')
         else:
+            part_of_book = bool(meta.get("chain") and (meta.get("part_index") or meta.get("glue")))
             actions.append(f'<form class="inline" method="post" action="/repeat/{job.meta["session"]}">'
-                           f'<button class="ghost" type="submit" title="Запустить сборку этой книги заново">'
-                           f'повторить</button></form>')
+                           f'<button class="ghost" type="submit" title="'
+                           + ("Повторить только эту часть" if meta.get("part_index") else
+                              "Запустить сборку этой книги заново")
+                           + f'">{"повторить часть" if meta.get("part_index") else "повторить"}</button></form>')
+            if part_of_book and chain is not None:
+                actions.append('<form class="inline" method="post" action="/chain/restart/' + chain.id + '" '
+                               "onsubmit=\"return confirm('Начать всю книгу заново: новая нарезка и все части?')\""
+                               '><button class="ghost" type="submit" title="Остановить всё по книге и озвучить '
+                               'её целиком заново">вся книга заново</button></form>')
             actions.append(f'<form class="inline" method="post" action="/delete/{job.meta["session"]}" '
                            f"onsubmit=\"return confirm('Убрать это задание из списка?')\""
                            f'><button class="ghost" type="submit" title="Убрать задание из списка '
