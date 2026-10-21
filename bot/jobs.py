@@ -347,31 +347,37 @@ class Jobs:
     def free_slot(self) -> bool:
         return len(self.live_running()) < self.max_jobs
 
-    def fail_stale_queued(self) -> int:
-        """На старте бота: не успевшие запуститься задания помечаем неудачными.
+    def interrupted(self) -> list:
+        """На старте бота: задания, которые оборвал перезапуск контейнера (обновление образа).
 
-        Исключения — цепочки частей: задание, которое ждёт свои части, не «застряло» (части лежат
-        в томе, и продолжение возможно), а нарезка, прерванная перезапуском, честно помечается
-        неудачной: её поток умер вместе с ботом.
+        Статус «идёт», а живого окна нет и итога тоже нет: процесс умер вместе с прежним
+        контейнером, а не упал сам. Готовое (архив уже лежит) сюда не попадает — его закроет refresh.
         """
-        fixed = 0
+        found = []
         for job in self.load():
-            if job.status == "waiting" and job.meta.get("chain"):
-                continue                      # части в томе: продолжение возможно, кнопка на странице
-            if job.status == "splitting":
-                job.meta.update({"status": "failed", "finished": time.time(),
-                                 "note": "Нарезка на части прервалась (бот перезапускали). "
-                                         "Нажмите «продолжить генерацию» — части пересоберутся здесь же."})
-                job.save()
-                fixed += 1
+            if job.status != "running" or self.alive(job):
                 continue
-            if job.status == "queued" and not self.alive(job):
-                job.meta.update({"status": "failed", "finished": time.time(),
-                                 "note": "Задание не запустилось (бот перезапускали). "
-                                         "Нажмите «повторить» или /repeat."})
-                job.save()
-                fixed += 1
-        return fixed
+            if any(pathlib.Path(path).exists() for path in job.archives()):
+                continue
+            if job.meta.get("pack_dir"):                 # «голоса»: итог — пакет в своей папке
+                started = float(job.meta.get("started") or 0) - 5
+                if any(path.stat().st_mtime >= started
+                       for path in pathlib.Path(job.meta["pack_dir"]).glob("*-voices.zip")):
+                    continue
+            found.append(job)
+        return found
+
+    def release_machine(self, job: Job, timeout: float = 60) -> None:
+        """Освободить машину Colab, брошенную прерванным заданием. Делается ДО повторного запуска:
+        у повтора то же имя сессии, и поздний «stop» погасил бы уже новую машину."""
+        binary = shutil.which("colab")
+        if not binary:
+            return
+        try:
+            subprocess.run([binary, "stop", "-s", job.meta["session"]], capture_output=True, text=True,
+                           timeout=timeout, env=self.env, input="")
+        except Exception:
+            pass
 
     @locked
     def start(self, job: Job, book: pathlib.Path, gpu: str = "T4", drive_dir: str = "Audiobooks-colab",
@@ -521,7 +527,7 @@ class Jobs:
         changed = {}
         for job in self.load():
             if job.status == "queued":          # ждёт своей очереди — застрявшие после
-                continue                        # перезапуска ловит fail_stale_queued() при старте
+                continue                        # перезапуска разбирает recover_after_restart() при старте
             if job.status != "running":
                 continue
             if self.alive(job):

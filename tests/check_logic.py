@@ -405,10 +405,13 @@ check("пока идёт сборка, вторую книгу запустит�
 jobs2.stop(job2)                                    # прибираем: tmux-сессию и машину
 
 
-# ── незапустившееся задание не висит вечно ──
+# ── перезапуск контейнера: очередь остаётся очередью, оборванное — находится ──
 lost = jobs.add("lost.epub", "test")
-check("застрявшее задание помечается неудачным", jobs.fail_stale_queued() == 1 and
-      jobs.by_id(lost.id).status == "failed")
+cut = jobs.add("cut.epub", "test")
+cut.meta.update({"status": "running", "started": 1.0, "session": "nosuchsession"})
+cut.save()
+check("после перезапуска задание из очереди остаётся в очереди, а оборванное находится",
+      jobs.by_id(lost.id).status == "queued" and [job.id for job in jobs.interrupted()] == [cut.id])
 
 # ── мелочи форматирования ──
 check("время пишется по-русски", webmod.human_delta(90) == "1 мин" and webmod.human_delta(30) == "30 с")

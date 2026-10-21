@@ -771,6 +771,59 @@ class App:
         self.requeue(job, "продолжаю по вашей команде")
         return f"▶️ «{job.meta['name']}»: продолжаю под {self.profile_label()}."
 
+    RESTARTS_MAX = 5                    # столько раз подряд задание можно продолжить после перезапуска
+
+    def recover_after_restart(self) -> list:
+        """Старт бота: всё, что оборвал перезапуск контейнера (обновление образа), продолжаем сами.
+
+        Это не сбой аккаунта: профиль не меняем, круг профилей не трогаем. Озвучка на Colab — в очередь
+        на том же аккаунте (брошенную машину сначала гасим); часть, чья озвучка уже в томе, —
+        пересобираем здесь; нарезку и сборку книги из частей — запускаем заново. Очередь — как была.
+        Возвращает строки «что продолжено» — для журнала и Telegram.
+        """
+        done = []
+        for job in self.jobs.interrupted():
+            name = job.meta.get("name") or job.id
+            restarts = int(job.meta.get("restarts") or 0) + 1
+            if restarts > self.RESTARTS_MAX:
+                continue                         # обрывается снова и снова — пусть идёт обычным сбоем
+            job.meta["restarts"] = restarts
+            chain = self.chains.by_id(job.meta.get("chain") or "")
+            line = "бот перезапускали (обновление образа) — "
+            if job.meta.get("glue") and chain is not None:
+                job.meta.update({"status": "failed", "finished": time.time(),
+                                 "note": "сборка книги прервалась перезапуском — собираю заново"})
+                job.save()
+                job.log_line(line + "сборка книги прервалась, запускаю её заново")
+                self.glue_chain(chain.id)
+                done.append(f"«{name}»: сборка книги заново")
+                continue
+            part = job.meta.get("part_index")
+            if chain is not None and part and f"сырьё части {part} распаковано" in job.tail(40000):
+                # Озвучка части уже в томе: прерванную сборку части повторит reglue, без машины.
+                job.meta.pop("reglued", None)
+                job.meta.update({"status": "failed", "finished": time.time(),
+                                 "note": "сборка части прервалась перезапуском"})
+                job.save()
+                job.log_line(line + "озвучка части уже в томе, собираю часть здесь")
+                done.append(f"«{name}»: сборка части здесь, без повторной озвучки")
+                continue
+            if not job.meta.get("local"):
+                job.log_line(line + "гашу брошенную машину Colab")
+                if not self.profiles.enabled or int(job.meta.get("profile") or 0) in (0, self.profiles.active()):
+                    self.jobs.release_machine(job)
+            job.meta.update({"status": "queued", "note": "", "finished": None, "result": "", "pid": None})
+            job.save()
+            job.log_line(line + "запускаю заново на том же аккаунте")
+            done.append(f"«{name}»: заново на том же аккаунте")
+        for job in self.jobs.load():
+            chain = self.chains.by_id(job.meta.get("chain") or "")
+            if job.status == "splitting" and chain is not None:
+                job.log_line("бот перезапускали (обновление образа) — нарезка прервалась, режу заново")
+                self.continue_chain(chain.id, keep_tried=True)
+                done.append(f"«{job.meta.get('name')}»: нарезка на части заново")
+        return done
+
     def resume_after_login(self) -> None:
         """Вошли в профиль, которого ждала книга (или цепочка частей), — продолжаем сами."""
         if not self.profiles.enabled:
@@ -2383,13 +2436,14 @@ def main() -> int:
     swept = app.housekeeping(force=True)
     print(f"[bot] уборка томов: {', '.join(swept) if swept else 'убирать нечего'} "
           f"(хранить {app.settings.keep_days} дн., дальше — раз в час)", flush=True)
-    stale = app.jobs.fail_stale_queued()
-    if stale:
-        print(f"[bot] заданий, не успевших запуститься: {stale} — помечены неудачными, "
-              f"их можно повторить", flush=True)
-        app.notify_owner(f"⚠️ После перезапуска нашлось незапущенных заданий: {stale}. "
-                         f"Нажмите «повторить» на странице или /repeat <номер>, "
-                         f"чтобы собрать их заново.")
+    resumed = app.recover_after_restart()
+    queued = sum(job.status == "queued" for job in app.jobs.load())
+    if resumed:
+        print(f"[bot] после перезапуска продолжаю: {'; '.join(resumed)}", flush=True)
+        app.notify_owner("🔄 Бот перезапущен (обновление образа). Продолжаю сам:\n• " + "\n• ".join(resumed)
+                         + (f"\nВ очереди всего: {queued}." if queued else ""))
+    elif queued:
+        print(f"[bot] после перезапуска в очереди заданий: {queued} — пойдут сами", flush=True)
     print(f"[bot] @{app.username} на связи; конвейер {PIPELINE}; данные {DATA}", flush=True)
     print(f"[bot] владелец: {app.owner_chat() or 'пока не определён (первый написавший станет владельцем)'}"
           f"; остальным не отвечаю", flush=True)

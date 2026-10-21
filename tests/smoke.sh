@@ -214,6 +214,8 @@ echo "--- ударения и ё: Silero, только словарь, слов�
 if ! python3 "$HERE/check_stress.py"; then fail=1; fi
 echo "--- страница по вкладкам: настройки по разделам, кнопки по состоянию, остановка с частями ---"
 if ! python3 "$HERE/check_tabs.py"; then fail=1; fi
+echo "--- обновление образа: прерванное продолжается само, только незаконченная часть ---"
+if ! python3 "$HERE/check_restart.py"; then fail=1; fi
 echo "--- уборка томов: старое удаляется, журналы не растут ---"
 if ! python3 "$HERE/check_housekeeping.py"; then fail=1; fi
 echo "--- профили Google Colab: переключение, сбои, пауза ---"
