@@ -218,12 +218,13 @@ web = webmod.WebApp(app.jobs, settings=app.settings, chains=app.chains, profiles
 for _ in range(6):                              # круг заново с активного: 3, 3 → 1, 1 → 2, 2
     fail()
 check("пауза снова после полного круга", app.jobs.by_id(job.id).status == "paused")
-page = web.jobs_page(1)
+page = web.jobs_page(1) + web.colab_card()      # «Сборки» и вкладка «Google Colab»
 check("страница: у паузы кнопка «продолжить»", f"/resume/{job.meta['session']}" in page)
 check("страница: у каждого профиля своя кнопка «войти», есть «добавить» и «выйти из всех»",
       all(f"/profile/login/{n}" in page for n in (1, 2, 3)) and "/profile/add" in page
       and "/profile/logout_all" in page)
-check("страница: число профилей задаётся в настройках", 'name="profiles"' in page)
+check("страница: профили добавляются и удаляются кнопками на вкладке Colab",
+      "/profile/add" in page and "/profile/delete/" in page)
 code, _, _, headers = web.route("POST", f"/resume/{job.meta['session']}")
 check("страница: «продолжить» работает", app.jobs.by_id(job.id).status == "queued")
 web.route("POST", "/profile/activate/2")

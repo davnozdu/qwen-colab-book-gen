@@ -37,6 +37,17 @@ CHAIN_ICONS = {"queued": "⏳", "running": "▶️", "done": "✅", "failed": "�
                "held": "⏸", "stopped": "⏹"}
 CHAIN_STATUS = {"queued": "в очереди", "running": "идёт", "done": "готово", "failed": "сбой",
                 "held": "ждёт вашего решения", "stopped": "остановлено"}
+# Вкладки страницы: у каждой свой адрес, поэтому ссылки, «назад» и обновление ведут туда же.
+TABS = (("/", "Сборки"), ("/files", "Книги"), ("/results", "Готовое"), ("/voices", "Голоса"),
+        ("/colab", "Google Colab"), ("/settings", "Настройки"))
+JOB_ICONS = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
+             "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸",
+             "paused": "⏸", "casting": "🎭", "choice_voices": "🎭"}
+JOB_STATUS = {"done": "готово", "failed": "сбой", "running": "идёт", "queued": "в очереди",
+              "stopped": "остановлено", "splitting": "режется на части", "waiting": "озвучиваются части",
+              "gluing": "собирается из частей", "choice": "ждёт решения: резать ли", "held": "ждёт решения",
+              "paused": "пауза", "casting": "готовятся голоса героев", "choice_voices": "ждёт решения: голоса"}
+DECISIONS = ("choice", "choice_voices", "paused", "held")     # строки, где без человека дальше не пойдёт
 
 STYLE = """
  body { font: 15px/1.5 -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 24px;
@@ -70,13 +81,32 @@ STYLE = """
  .pager { margin-top: 10px; }
  .pager a, .pager span { margin-right: 10px; }
  code { background: #14161a; padding: 1px 4px; border-radius: 4px; }
+ nav.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 14px 0 0; border-bottom: 1px solid #2a2f36; }
+ nav.tabs a { padding: 8px 14px; border-radius: 8px 8px 0 0; text-decoration: none; color: #9aa0a6; }
+ nav.tabs a.on { background: #1c1f24; color: #e8e8e8; border: 1px solid #2a2f36; border-bottom-color: #1c1f24;
+                 margin-bottom: -1px; }
+ nav.tabs .count { background: #f0a35e; color: #14161a; border-radius: 9px; padding: 0 6px; font-size: 12px;
+                   margin-left: 4px; }
+ .now { background: #1c1f24; border: 1px solid #2a2f36; border-radius: 10px; padding: 10px 14px; margin: 14px 0 0; }
+ fieldset { border: 1px solid #2a2f36; border-radius: 10px; padding: 12px 14px; margin: 0 0 14px; }
+ legend { padding: 0 6px; font-weight: 600; }
+ .row { margin-top: 8px; }
+ .hint { color: #9aa0a6; font-size: 13px; margin-top: 2px; }
+ select, input[type=number], input[type=password] { background: #14161a; color: #e8e8e8;
+         border: 1px solid #3a3f47; border-radius: 6px; padding: 5px 8px; font: inherit; }
 """
 
 SCRIPT = """
-// Обновляем страницу, чтобы видеть ход сборки, но не мешаем вводить код авторизации, не
-// перезагружаем живой журнал (у него своя подгрузка) и не сбиваем поиск, пока его набирают.
+// Сама обновляется только вкладка «Сборки» (data-live): там идёт ход сборки. Настройки, вход и
+// списки не перезагружаются — иначе выбранное, но не сохранённое пропадало бы через 5 секунд.
+// И на «Сборках» не мешаем: тронули поле формы или набираете поиск — обновление ждёт.
 let typedAt = 0;
+let dirty = false;
+document.addEventListener('change', function (event) {
+  if (!event.target.classList || !event.target.classList.contains('search')) { dirty = true; }
+});
 setInterval(function () {
+  if (document.body.dataset.live !== '1' || dirty) { return; }
   const busy = document.querySelector('input[name=code]') || document.getElementById('log');
   const active = document.activeElement;
   const typing = (active && active.classList && active.classList.contains('search'))
@@ -182,7 +212,7 @@ def safe_name(name: str) -> str:
 class WebApp:
     """Логика страницы: проверяется в тестах без сокетов."""
 
-    def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, login=None,
+    def __init__(self, jobs, max_hours: float = 7.0, launch=None, stop=None, stop_all=None, login=None,
                  notify=None, settings=None, chains=None, continue_chain=None, glue=None,
                  ask_split=None, choose_split=None, retry_part=None, profiles=None,
                  profile_action=None, resume=None, profile_label=None, voice_packs=None,
@@ -191,6 +221,8 @@ class WebApp:
         self.max_hours = max_hours
         self.launch_job = launch or (lambda job: None)
         self.stop_job = stop or (lambda job: None)
+        # «Остановить всё» — то же, что /stop в Telegram (с частями книг и машинами голосов).
+        self.stop_all = stop_all
         # notify — то же самое сообщение уходит в Telegram: что нажали на странице, видно и в чате.
         self.notify = notify or (lambda text: None)
         # login — объект с методами state(), begin(), submit(code), reset(), usage()
@@ -238,11 +270,17 @@ class WebApp:
         where = parsed.path.rstrip("/") or "/"
 
         if method == "GET" and where == "/":
-            return self.html(self.shell(self.jobs_page(page)))
+            return self.html(self.shell(self.jobs_page(page), "/", live=True))
         if method == "GET" and where == "/files":
-            return self.html(self.shell(self.files_card("books", "/files")))
+            return self.html(self.shell(self.files_card("books", "/files"), "/files"))
         if method == "GET" and where == "/results":
-            return self.html(self.shell(self.files_card("results", "/results")))
+            return self.html(self.shell(self.files_card("results", "/results"), "/results"))
+        if method == "GET" and where == "/voices":
+            return self.html(self.shell(self.voices_page(), "/voices"))
+        if method == "GET" and where == "/colab":
+            return self.html(self.shell(self.colab_card(), "/colab"))
+        if method == "GET" and where == "/settings":
+            return self.html(self.shell(self.settings_card(), "/settings"))
         if method == "GET" and parsed.path.startswith("/fragment/"):
             # Только таблица списка — для поиска на лету (страницу целиком не перерисовываем).
             kind = path_las(parsed.path)
@@ -279,14 +317,14 @@ class WebApp:
             job = self.jobs.by_id(parsed.path[len("/eta/"):].strip("/"))
             if job is None:
                 return 200, "text/plain; charset=utf-8", "нет такого задания".encode(), {}
-            return self.html(self.shell(self.eta_page(job)))
+            return self.html(self.shell(self.eta_page(job), "/"))
         if method == "GET" and parsed.path.startswith("/log/"):
             job = self.jobs.by_id(parsed.path[len("/log/"):].strip("/"))
             if job is None:
                 return 200, "text/plain; charset=utf-8", "нет такого задания".encode(), {}
             if "raw" in query or query.get("raw"):
                 return 200, "text/plain; charset=utf-8", job.tail(200_000).encode(), {}
-            return self.html(self.shell(self.log_page(job)))
+            return self.html(self.shell(self.log_page(job), "/"))
         if method == "GET" and parsed.path.startswith("/voice/"):
             pieces = parsed.path.strip("/").split("/")
             sample = (self.voice_packs.sample(pieces[1], pieces[2].removesuffix(".wav"))
@@ -295,9 +333,15 @@ class WebApp:
                 return 404, "text/plain; charset=utf-8", "образца нет".encode(), {}
             return 200, "audio/wav", sample, {}
         if method == "POST" and where == "/llm/models":
+            # Кнопка внутри формы настроек: только что введённый ключ сначала сохраняем, иначе
+            # список моделей запросился бы по старому ключу (или вовсе без ключа).
+            if self.settings is not None and form_fields(content_type, body):
+                saved = self.save_settings(content_type, body)
+                if "не изменены" in saved:
+                    return self.redirect("/settings", saved)
             message = self.refresh_models()
             self.notify("Модели LLM со страницы: " + message)
-            return self.redirect("/", message)
+            return self.redirect("/settings", message)
         if method == "GET" and parsed.path.startswith("/result/"):
             return self.send_file(self.jobs.results, path_las(parsed.path), "application/zip")
         if method == "GET" and parsed.path.startswith("/file/"):
@@ -338,6 +382,10 @@ class WebApp:
             self.notify("Выбор со страницы. " + message)
             return self.redirect("/", message)
         if method == "POST" and where == "/stop":                    # остановить всё
+            if self.stop_all is not None:
+                message = self.stop_all()
+                self.notify("Со страницы: " + message)
+                return self.redirect("/", message)
             jobs = [job for job in self.jobs.load() if job.status in ("running", "queued")]
             for job in jobs:
                 self.stop_job(job)
@@ -361,39 +409,41 @@ class WebApp:
             job = self.jobs.by_id(path_las(parsed.path))
             if job is None:
                 return self.redirect("/", "Такого задания нет.")
-            self.stop_job(job)
-            return self.redirect("/", f"Задание «{job.meta['name']}» остановлено.")
+            detail = self.stop_job(job)
+            message = f"⏹ «{job.meta['name']}» остановлено" + (f": {detail}." if detail else ".")
+            self.notify("Со страницы: " + message)
+            return self.redirect("/", message)
         if method == "POST" and where == "/login/start":
             message = self.login_call("begin")
             self.notify("Вход запрошен со страницы.\n" + message)   # ссылка придёт и в Telegram
-            return self.redirect("/", message)
+            return self.redirect("/colab", message)
         if method == "POST" and where == "/login/code":
             fields = form_fields(content_type, body)
             code = (fields.get("code", {}).get("data") or b"").decode("utf-8", "replace").strip()
             if not code:
-                return self.redirect("/", "Код пустой — скопируйте его со страницы Google и вставьте сюда.")
+                return self.redirect("/colab", "Код пустой — скопируйте его со страницы Google и вставьте сюда.")
             message = self.login_call("submit", code)
             self.notify("Код со страницы: " + message)
-            return self.redirect("/", message)
+            return self.redirect("/colab", message)
         if method == "POST" and parsed.path.startswith("/profile/"):
             # /profile/<действие>/<номер>: login, activate, logout, delete; add и logout_all — без номера
             pieces = parsed.path.strip("/").split("/")
             action = pieces[1] if len(pieces) > 1 else ""
             number = int(pieces[2]) if len(pieces) > 2 and pieces[2].isdigit() else 0
             if action not in ("login", "activate", "logout", "delete", "add", "logout_all"):
-                return self.redirect("/", "Неизвестное действие с профилем.")
+                return self.redirect("/colab", "Неизвестное действие с профилем.")
             try:
                 message = str(self.profile_action(action, number))
             except Exception as exc:
                 message = f"Не вышло: {exc}"
             self.notify(f"Профили со страницы: {message}")
-            return self.redirect("/", message)
+            return self.redirect("/colab", message)
         if method == "POST" and parsed.path.startswith("/resume/"):
             message = self.resume(path_las(parsed.path))
             self.notify("Со страницы: " + message)
             return self.redirect("/", message)
         if method == "POST" and where == "/login/reset":
-            return self.redirect("/", self.login_call("reset"))
+            return self.redirect("/colab", self.login_call("reset"))
         if method == "POST" and parsed.path.startswith("/chain/final/"):
             chain = urllib.parse.unquote(parsed.path.split("/chain/final/", 1)[1])
             message = self.glue(chain)
@@ -411,7 +461,7 @@ class WebApp:
         if method == "POST" and parsed.path.startswith("/voices/delete/"):
             message = self.delete_voices(path_las(parsed.path))
             self.notify("Со страницы: " + message)
-            return self.redirect("/", message)
+            return self.redirect("/voices", message)
         if method == "POST" and parsed.path.startswith("/chain/restart/"):
             message = self.restart_book(path_las(parsed.path))
             self.notify("Со страницы: " + message)
@@ -423,19 +473,25 @@ class WebApp:
             return self.redirect("/", message)
         if method == "POST" and where == "/settings":
             if self.settings is None:
-                return self.redirect("/", "Настройки недоступны в этой сборке.")
-            fields = form_fields(content_type, body)
-            raw = {name: (field.get("data") or b"").decode("utf-8", "replace").strip()
-                   for name, field in fields.items()}
-            # Флажок: когда он снят, в форме его просто нет. Поэтому «нет» передаём явно —
-            # иначе сохранение тихо вернуло бы копирование на Drive обратно.
-            raw["drive"] = "on" if "drive" in fields else "off"
-            message = self.settings.update(raw)
-            self.notify("Настройки со страницы. " + message)
-            return self.redirect("/", message)
+                return self.redirect("/settings", "Настройки недоступны в этой сборке.")
+            return self.redirect("/settings", self.save_settings(content_type, body))
         if method == "POST" and where == "/colab/usage":
-            return self.redirect("/", self.login_call("usage"))
+            return self.redirect("/colab", self.login_call("usage"))
         return 404, "text/plain; charset=utf-8", "нет такой страницы".encode(), {}
+
+    def save_settings(self, content_type: str, body: bytes) -> str:
+        """Форма настроек → настройки. Чего в форме нет, то остаётся как было (а не сбрасывается)."""
+        fields = form_fields(content_type, body)
+        raw = dict(self.settings.values)
+        raw.update({name: (field.get("data") or b"").decode("utf-8", "replace").strip()
+                    for name, field in fields.items()})
+        if "mode" in fields:
+            # Флажок Drive стоит рядом с режимом: снятый флажок в форму не попадает вовсе, поэтому
+            # «нет» передаём явно — иначе сохранение тихо вернуло бы копирование на Drive.
+            raw["drive"] = "on" if "drive" in fields else "off"
+        message = self.settings.update(raw)
+        self.notify("Настройки со страницы. " + message)
+        return message
 
     def login_call(self, action: str, *args) -> str:
         if self.login is None:
@@ -446,49 +502,70 @@ class WebApp:
             return f"Не вышло: {exc}"
 
     # ────────────────────────────── страницы ──────────────────────────────
-    def shell(self, body: str) -> str:
+    def shell(self, body: str, tab: str = "/", live: bool = False) -> str:
         banner = ""
         if self.last_message:
             banner = f'<div class="msg">{html.escape(self.last_message)}</div>'
             self.last_message = ""
+        jobs = self.jobs.load()
+        waiting = sum(job.status in DECISIONS for job in jobs)
+        links = []
+        for path, title in TABS:
+            count = f'<span class="count" title="ждут вашего решения">{waiting}</span>' \
+                if path == "/" and waiting else ""
+            active = ' class="on"' if path == tab else ""
+            links.append(f'<a href="{path}"{active}>{title}{count}</a>')
         return (f'<!doctype html><html lang="ru"><head><meta charset="utf-8">'
                 f'<meta name="viewport" content="width=device-width, initial-scale=1">'
                 f'<title>Сборка аудиокниг</title><style>{STYLE}</style>'
-                f'<script>{SCRIPT}</script></head><body><main>'
+                f'<script>{SCRIPT}</script></head><body data-live="{1 if live else 0}"><main>'
                 f'<h1>Сборка аудиокниг</h1>'
-                f'<div class="muted">Книга собирается через Google Colab; готовое уезжает на '
-                f'Google Drive и лежит в томе. Страница обновляется сама каждые 5 секунд.</div>'
+                f'{self.now_line(jobs)}'
+                f'<nav class="tabs">{"".join(links)}</nav>'
                 f'{banner}{body}'
                 f'<div class="muted" style="margin-top:16px">Обновлено {time.strftime("%H:%M:%S")}'
-                f' · <a href="/">сборки</a> · <a href="/files">книги</a> · '
-                f'<a href="/results">архивы</a> · <a href="/api/jobs">json</a></div>'
+                + (" · вкладка обновляется сама каждые 5 секунд" if live else "")
+                + ' · <a href="/api/jobs">json</a></div>'
                 f'</main></body></html>')
+
+    def now_line(self, jobs: list) -> str:
+        """Одна строка над вкладками: что идёт прямо сейчас, сколько в очереди и ждут решения."""
+        running = self.jobs.live_running()
+        if running:
+            job = running[0]
+            text = (f'▶️ Сейчас: <b>{html.escape(job.meta["name"])}</b> — '
+                    f'{html.escape(progress_line(job.progress()))} · '
+                    f'<a href="/eta/{job.meta["session"]}">подробнее</a> · '
+                    f'<a href="/log/{job.meta["session"]}">журнал</a>')
+        else:
+            text = '<span class="muted">Сейчас ничего не собирается — книгу можно загрузить на вкладке «Сборки».</span>'
+        queued = sum(job.status == "queued" for job in jobs)
+        waiting = sum(job.status in DECISIONS for job in jobs)
+        extra = []
+        if queued:
+            extra.append(f"в очереди: {queued}")
+        if waiting:
+            extra.append(f'<a href="/">ждут вашего решения: {waiting}</a>')
+        return f'<div class="now">{text}' + (f'<div class="muted">{" · ".join(extra)}</div>' if extra else "") + "</div>"
 
     def html(self, page: str) -> tuple:
         return 200, "text/html; charset=utf-8", page.encode(), {}
 
     def jobs_page(self, page: int) -> str:
-        jobs = self.jobs.load()
-        running = self.jobs.live_running()
-        busy = bool(running)
-
+        """Вкладка «Сборки»: загрузить книгу, книги по частям и все сборки."""
+        busy = bool(self.jobs.live_running())
         hint = ""
         if busy:
-            job = running[0]
-            minutes = (time.time() - float(job.meta.get("started") or time.time())) / 60
-            hint = (f'<div class="note">Сейчас идёт сборка «{html.escape(job.meta["name"])}» '
-                    f'({minutes:.0f} мин). Новую книгу можно загрузить после неё или '
-                    f'остановить текущую кнопкой ниже.</div>')
-
-        upload = f"""<div class="card"><h2>Загрузить книгу</h2>
+            hint = ('<div class="note">Сейчас идёт сборка (см. строку вверху). Новую книгу можно загрузить '
+                    'после неё или остановить текущую.</div>')
+        upload = f"""<div class="card"><h2>Новая книга</h2>
 <form method="post" action="/upload" enctype="multipart/form-data">
   <input type="file" name="book" accept=".epub" {"disabled" if busy else ""}>
   <button type="submit" {"disabled" if busy else ""}>Загрузить и запустить</button>
 </form>
-<div class="muted" style="margin-top:8px">Только EPUB. {self.mode_hint()} Одна книга за раз.</div>{hint}</div>"""
-
-        return upload + self.chains_card() + self.voices_card() + self.settings_card() + self.colab_card() \
-            + self.jobs_card() + self.files_card("books", "/") + self.files_card("results", "/")
+<div class="muted" style="margin-top:8px">Только EPUB, одна книга за раз. {self.mode_hint()}
+<a href="/settings">Изменить в настройках</a>.</div>{hint}</div>"""
+        return upload + self.chains_card() + self.jobs_card()
 
     def param(self, name: str) -> str:
         return ((getattr(self, "query", None) or {}).get(name) or [""])[0].strip()
@@ -580,11 +657,9 @@ class WebApp:
         return "".join(cards)
 
     def voices_fields(self) -> str:
-        """Многоголосая озвучка: режим, поставщик LLM, ключи (показываем только хвост) и модель."""
+        """Раздел LLM: поставщик, модель, ключи (показываем только хвост) и «считать модели»."""
         import llm
         settings = self.settings
-        voices = "".join(f'<option value="{k}"{" selected" if k == settings.voices else ""}>{html.escape(v)}</option>'
-                         for k, v in bot_settings.VOICES.items())
         providers = "".join(f'<option value="{k}"{" selected" if k == settings.llm_provider else ""}>'
                             f'{html.escape(v)}</option>' for k, v in llm.PROVIDERS.items())
         names = settings.models()
@@ -594,16 +669,37 @@ class WebApp:
         models = "".join(f'<option value="{html.escape(n)}"{" selected" if n == current else ""}>{html.escape(n)}'
                          f'</option>' for n in names)
         keys = "".join(
-            f'<div style="margin-top:6px"><label>Ключ {html.escape(title)}</label> '
+            f'<div class="row"><label>Ключ {html.escape(title)}</label> '
             f'<input type="password" name="{provider}_key" autocomplete="off" style="width:18em" '
             f'placeholder="{html.escape(llm.masked(settings.values.get(provider + "_key", "")) or "не задан")}"> '
-            f'<span class="muted">(пусто — оставить как есть)</span></div>'
+            f'<span class="hint">пусто — оставить как есть</span></div>'
             for provider, title in llm.PROVIDERS.items())
-        return (f'<div style="margin-top:12px"><label>Озвучка</label><br><select name="voices">{voices}</select> '
-                f'<span class="muted">многоголосая: первая машина размечает роли через LLM и создаёт голоса '
-                f'героев, вторая озвучивает; рассказчик — прежний; без ключа LLM — один голос</span></div>'
-                f'<div style="margin-top:6px"><label>Поставщик LLM</label> <select name="llm_provider">{providers}'
-                f'</select> <label>модель</label> <select name="llm_model">{models}</select></div>{keys}')
+        state = (f'ключ {html.escape(llm.PROVIDERS[settings.llm_provider])} '
+                 + ('<span class="ok">есть</span>' if settings.llm_key else '<span class="bad">не задан</span>'))
+        return (f'<fieldset><legend>LLM</legend>'
+                f'<div class="hint">Нужна для многоголосой озвучки (роли героев), арбитра ударений и чтения '
+                f'иностранных слов. Сейчас: {state}.</div>'
+                f'<div class="row"><label>Поставщик</label> <select name="llm_provider">{providers}</select> '
+                f'<label>модель</label> <select name="llm_model">{models}</select> '
+                f'<button class="ghost" type="submit" formaction="/llm/models" title="Сохранить настройки и '
+                f'запросить у поставщика список моделей по ключу">считать модели</button></div>{keys}'
+                f'</fieldset>')
+
+    def stress_fields(self) -> str:
+        """Раздел «Голоса и произношение»: один голос или многоголосая, и как ставить ударения и ё."""
+        voices = "".join(f'<option value="{k}"{" selected" if k == self.settings.voices else ""}>'
+                         f'{html.escape(v)}</option>' for k, v in bot_settings.VOICES.items())
+        stress = "".join(f'<option value="{k}"{" selected" if k == self.settings.stress else ""}>'
+                         f'{html.escape(v)}</option>' for k, v in bot_settings.STRESS.items())
+        return (f'<fieldset><legend>Голоса и произношение</legend>'
+                f'<div><label>Озвучка</label> <select name="voices">{voices}</select>'
+                f'<div class="hint">Многоголосая: первая машина размечает роли через LLM и создаёт голоса '
+                f'героев, вторая озвучивает; рассказчик прежний. Без ключа LLM — один голос.</div></div>'
+                f'<div class="row"><label>Ударения и ё</label> <select name="stress">{stress}</select>'
+                f'<div class="hint">Silero — как раньше. Только словарь — полный словарь Supertonic '
+                f'(3,3 млн словоформ, ё), без нейросети. Silero + словарь — там, где они расходятся, LLM '
+                f'выбирает вариант по предложению и абзацу; без ключа споры решает гибрид.</div></div>'
+                f'</fieldset>')
 
     def voices_card(self) -> str:
         """Голоса последних многоголосых книг: герои и их образцы — послушать прямо здесь."""
@@ -642,59 +738,63 @@ class WebApp:
         return "Режим «одна книга целиком»: книга идёт одним прогоном, без нарезки."
 
     def settings_card(self) -> str:
-        """Админка: как обрабатывать книги. Настройки те же, что видит бот, и живут в томе."""
+        """Вкладка «Настройки»: те же значения, что видит бот; живут в томе. Одна форма, разделы."""
         if self.settings is None:
-            return ""
+            return '<div class="card">Настройки недоступны в этой сборке.</div>'
         options = "".join(
             f'<option value="{html.escape(value)}"{" selected" if value == self.settings.mode else ""}>'
             f'{html.escape(title)}</option>'
             for value, title in bot_settings.MODES.items())
         note = ""
         if self.settings.mode == bot_settings.MODE_PARTS:
-            note = (f'<div class="note">Режим частей: книгу длиннее {self.settings.parts_hours:g} ч бот '
+            note = (f'<div class="note row">Режим частей: книгу длиннее {self.settings.parts_hours:g} ч бот '
                     f'режет по абзацам; каждая часть уходит в облако только на синтез, сырьё '
                     f'возвращается в том, готовая часть приходит архивом. Когда готовы все части — '
                     f'склейка, громкость, музыка и сборка книги здесь, в контейнере. Google Drive в '
                     f'этом режиме не используется.</div>')
         return (f'<div class="card"><h2>Настройки</h2>'
+                f'<div class="muted" style="margin-bottom:12px">Сейчас: {html.escape(self.settings.summary())}</div>'
                 f'<form method="post" action="/settings">'
-                f'<div><label>Как обрабатывать книги</label><br>'
-                f'<select name="mode">{options}</select></div>'
-                f'<div style="margin-top:8px"><label>Длинные книги резать на части по</label> '
+                f'<fieldset><legend>Как собирать книгу</legend>'
+                f'<div><label>Как обрабатывать книги</label> <select name="mode">{options}</select></div>'
+                f'<div class="row"><label>Длинные книги резать на части по</label> '
                 f'<input type="number" name="parts_hours" step="0.5" min="0.5" max="12" '
-                f'value="{self.settings.parts_hours:g}" style="width:5em"> ч</div>'
-                f'<div style="margin-top:8px"><label>'
+                f'value="{self.settings.parts_hours:g}" style="width:5em"> ч'
+                f'<div class="hint">действует только в режиме «с разбивкой на части»</div></div>'
+                f'<div class="row"><label>'
                 f'<input type="checkbox" name="drive"{" checked" if self.settings.drive else ""}> '
-                f'копировать книгу на Google Drive</label></div>'
-                f'<div style="margin-top:8px"><label>Считать сборку зависшей, если нет движения</label> '
-                f'<input type="number" name="stall_minutes" step="5" min="0" max="600" '
-                f'value="{self.settings.stall_minutes}" style="width:5em"> мин '
-                f'<span class="muted">(журнал не растёт — машину гасим и пишем предупреждение; 0 — не следить)</span></div>'
-                f'<div style="margin-top:8px"><label>Профилей Google Colab</label> '
-                f'<input type="number" name="profiles" step="1" min="1" max="{bot_settings.PROFILES_MAX}" '
-                f'value="{self.settings.profiles}" style="width:4em"> '
-                f'<span class="muted">(аккаунты, между которыми бот переключается при сбоях)</span></div>'
-                f'<div style="margin-top:8px"><label>Хранить завершённое</label> '
-                f'<input type="number" name="keep_days" step="1" min="1" max="365" '
-                f'value="{self.settings.keep_days}" style="width:5em"> дн. '
-                f'<span class="muted">(старые задания и их журналы, книги по частям, архивы и книги '
-                f'удаляются сами; сырьё частей собранной книги — через сутки; журналы Colab CLI '
-                f'обрезаются)</span></div>'
+                f'копировать книгу на Google Drive</label>'
+                f'<div class="hint">только в режиме «одна книга целиком»</div></div>{note}'
+                f'</fieldset>'
+                f'{self.stress_fields()}'
                 f'{self.voices_fields()}'
-                f'<div style="margin-top:10px"><button type="submit">Сохранить</button></div>'
-                f'</form>'
-                f'<form method="post" action="/llm/models" style="margin-top:8px"><button class="ghost" '
-                f'type="submit" title="Запросить у поставщика список моделей по сохранённому ключу">'
-                f'считать модели</button></form>'
-                f'<div class="muted" style="margin-top:8px">Сейчас: '
-                f'{html.escape(self.settings.summary())}</div>{note}</div>')
+                f'<fieldset><legend>Обслуживание</legend>'
+                f'<div><label>Считать сборку зависшей, если нет движения</label> '
+                f'<input type="number" name="stall_minutes" step="5" min="0" max="600" '
+                f'value="{self.settings.stall_minutes}" style="width:5em"> мин'
+                f'<div class="hint">журнал не растёт — машину гасим и пишем предупреждение; 0 — не следить</div></div>'
+                f'<div class="row"><label>Хранить завершённое</label> '
+                f'<input type="number" name="keep_days" step="1" min="1" max="365" '
+                f'value="{self.settings.keep_days}" style="width:5em"> дн.'
+                f'<div class="hint">старые задания и журналы, книги по частям, архивы и книги удаляются сами; '
+                f'сырьё частей собранной книги — через сутки</div></div>'
+                f'</fieldset>'
+                f'<button type="submit">Сохранить</button> '
+                f'<span class="hint">Профили Google Colab — на вкладке <a href="/colab">Google Colab</a>.</span>'
+                f'</form></div>')
 
+    def voices_page(self) -> str:
+        """Вкладка «Голоса»: герои последних многоголосых книг и их образцы."""
+        cards = self.voices_card()
+        if cards:
+            return cards
+        state = bot_settings.VOICES.get(self.settings.voices, "") if self.settings is not None else ""
+        return (f'<div class="card"><h2>Голоса героев</h2><div class="muted">Многоголосых книг пока нет. '
+                f'Сейчас озвучка: {html.escape(state or "—")}. Включить многоголосую — '
+                f'<a href="/settings">Настройки → Голоса и произношение</a> (нужен ключ LLM).</div></div>')
 
     def job_row(self, job) -> str:
         meta = job.meta
-        icons = {"done": "✅", "failed": "⚠️", "running": "▶️", "queued": "⏳", "stopped": "⏹",
-                 "splitting": "✂️", "waiting": "🧩", "gluing": "🧩", "choice": "❓", "held": "⏸",
-                 "paused": "⏸", "casting": "🎭", "choice_voices": "🎭"}
         started = meta.get("started") or meta.get("created")
         finished = meta.get("finished") or time.time()
         elapsed = human_delta(finished - float(started or finished))
@@ -731,8 +831,16 @@ class WebApp:
         if job.status == "running":
             actions.append(f'<a href="/eta/{job.meta["session"]}" title="Проценты, сегменты и оценка '
                            f'времени до конца">сколько осталось</a>')
-            actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
+            actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}" '
+                           f"onsubmit=\"return confirm('Остановить сборку и освободить машину?')\">"
                            f'<button class="ghost" type="submit">остановить</button></form>')
+        elif job.status in ("queued", "casting"):
+            # Ждёт очереди или голосов героев: «повторить» тут завело бы вторую такую же книгу.
+            label = "отменить" if job.status == "queued" else "остановить"
+            why = " (и остановить машину, которая готовит голоса)" if job.status == "casting" else ""
+            actions.append(f'<form class="inline" method="post" action="/stop/{job.meta["session"]}">'
+                           f'<button class="ghost" type="submit" title="Не запускать эту сборку{why}">'
+                           f'{label}</button></form>')
         elif job.status == "choice_voices":
             for choice, label, hint in (("keep", "старые голоса", "Взять готовые голоса этой книги"),
                                         ("new", "голоса с нуля", "Заново разметка ролей и голоса героев")):
@@ -753,7 +861,7 @@ class WebApp:
                                         ("whole", "одним файлом", "Одним прогоном машины, без нарезки")):
                 actions.append(f'<form class="inline" method="post" action="/choice/{job.meta["session"]}/'
                                f'{choice}"><button type="submit" title="{hint}">{label}</button></form>')
-        elif job.status in ("splitting", "waiting", "gluing") and chain is not None:
+        elif job.status in ("splitting", "waiting", "gluing", "held") and chain is not None:
             # Книга с частями: «повторить» у неё бессмысленно (машину она не занимает), зато нужна
             # кнопка «продолжить» — ею цепочка поднимается после сбоя или перезапуска бота.
             actions.append('<form class="inline" method="post" action="/chain/continue/'
@@ -779,7 +887,8 @@ class WebApp:
                            f'><button class="ghost" type="submit" title="Убрать задание из списка '
                            f'(книга и архив останутся)">удалить</button></form>')
         return (f'<tr><td class="name">{html.escape(meta["name"])}</td>'
-                f'<td>{icons.get(job.status, "•")} {job.status} · {elapsed}{tail}{note}</td>'
+                f'<td>{JOB_ICONS.get(job.status, "•")} {JOB_STATUS.get(job.status, job.status)} · {elapsed}'
+                f'{tail}{note}</td>'
                 f'<td>{" · ".join(actions)}</td></tr>')
 
     def colab_card(self) -> str:
@@ -971,9 +1080,10 @@ class WebApp:
             changed = time.strftime("%d.%m %H:%M", time.localtime(stat.st_mtime))
             name = urllib.parse.quote(path.name)
             actions = []
-            if kind == "books":
+            if kind == "books" and path.name not in busy:
                 actions.append(f'<form class="inline" method="post" action="/run/{name}">'
-                               f'<button class="ghost" type="submit">запустить</button></form>')
+                               f'<button class="ghost" type="submit" title="Собрать эту книгу ещё раз">'
+                               f'запустить</button></form>')
             what = "книгу" if kind == "books" else "архив"
             if path.name in busy:
                 actions.append('<span class="muted" title="Книга сейчас в работе">в работе</span>')
@@ -1044,6 +1154,8 @@ class WebApp:
         if self.jobs.live_running():
             return self.redirect("/", "Сейчас идёт сборка — дождитесь её конца или нажмите "
                                        "«остановить всё».")
+        if book.name in self.books_in_use():
+            return self.redirect("/", f"«{book.name}» уже в работе — смотрите её строку на вкладке «Сборки».")
         job = self.jobs.add(book.name, "", book)
         job.meta["ask_voices"] = True        # повтор: голоса книги есть — спросить, старые или с нуля
         job.save()

@@ -251,7 +251,7 @@ app.settings.change(voices="multi")
 # ── 7. страница ─────────────────────────────────────────────────────────────
 page = webmod.WebApp(app.jobs, settings=app.settings, chains=app.chains, voice_packs=app.voice_packs,
                      refresh_models=app.refresh_models)
-html_page = page.jobs_page(1)
+html_page = page.settings_card() + page.voices_page()
 check("страница: режим голосов, поставщик, модель, ключи и «считать модели»",
       all(item in html_page for item in ('name="voices"', 'name="llm_provider"', 'name="llm_model"',
                                           'name="ollama_key"', 'name="deepseek_key"', "/llm/models"))
@@ -362,7 +362,7 @@ make_pack(app.voice_packs.folder(book))
 app.voice_packs.accept(app.voice_packs.folder(book) / "Книга с пробелами-voices.zip")
 page = webmod.WebApp(app.jobs, settings=app.settings, chains=app.chains, voice_packs=app.voice_packs,
                      choose_voices=app.choose_voices, delete_voices=app.delete_voices)
-check("страница: у голосов книги кнопка «удалить голоса»", f"/voices/delete/{key}" in page.jobs_page(1))
+check("страница: у голосов книги кнопка «удалить голоса»", f"/voices/delete/{key}" in page.voices_page())
 page.route("POST", f"/voices/delete/{key}")
 check("страница: голоса удаляются", app.voice_packs.pack(book) is None)
 

@@ -157,8 +157,8 @@ if web_job:
     check("архив скачивается со страницы", code == 200 and archive[:2] == b"PK")
 
 # ── 4. остановка задания и вход в Colab ────────────────────────────────────
-code, page = get("/")
-check("на странице статус входа в Colab виден",
+code, page = get("/colab")
+check("на вкладке Google Colab статус входа виден",
       code == 200 and any(marker in page for marker in
                           ("вход есть".encode(), "входа нет".encode(), "неизвестно".encode(),
                            "ждём код".encode())))
@@ -167,7 +167,7 @@ code, _, _ = post("/colab/usage")
 check("кнопка «проверить / остаток» отвечает", code in (200, 303), f"код {code}")
 
 code, _, _ = post("/login/start")
-follow = get("/")[1] if code == 303 else b""
+follow = get("/colab")[1] if code == 303 else b""
 check("кнопка «войти» отвечает без падения",
       code == 303 and ("код авторизации".encode() in follow or "уже есть".encode() in follow or "не выдал".encode() in follow))
 
@@ -196,12 +196,12 @@ def post_form(path: str, fields: dict):
     return post(path, urllib.parse.urlencode(fields).encode(), "application/x-www-form-urlencoded")
 
 
-code, page = get("/")
-check("на странице есть блок настроек",
+code, page = get("/settings")
+check("на вкладке «Настройки» есть разделы настроек",
       code == 200 and "Как обрабатывать книги".encode() in page and "Настройки".encode() in page)
 
 code, _, _ = post_form("/settings", {"mode": "parts", "parts_hours": "2", "drive": "on"})
-after = get("/")[1]
+after = get("/settings")[1]
 check("режим переключается на «с разбивкой на части»",
       code == 303 and "режим «с разбивкой на части»".encode() in after, f"код {code}")
 check("и страница объясняет, что делает режим частей",
@@ -209,13 +209,13 @@ check("и страница объясняет, что делает режим ч
       and "Путь частей ещё собирается".encode() not in after)
 
 code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "99", "drive": "on"})
-after = get("/")[1]
+after = get("/settings")[1]
 check("неправильный порог не применяется — режим остаётся прежним",
       code == 303 and "режим «с разбивкой на части»".encode() in after
       and "не изменены".encode() in after, f"код {code}")
 
 code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "1.5"})     # флажок снят
-after = get("/")[1]
+after = get("/settings")[1]
 check("снятый флажок выключает копирование на Google Drive",
       "Google Drive: нет".encode() in after
       and "режим «одна книга целиком, без нарезки»".encode() in after)

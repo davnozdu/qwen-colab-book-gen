@@ -210,6 +210,10 @@ echo "--- режим частей в Telegram: вопрос «резать?», �
 if ! python3 "$HERE/check_parts_telegram.py"; then fail=1; fi
 echo "--- многоголосая книга: LLM, голоса, пакет, один голос без ключа ---"
 if ! python3 "$HERE/check_voices.py"; then fail=1; fi
+echo "--- ударения и ё: Silero, только словарь, словарь + Silero + LLM-арбитр ---"
+if ! python3 "$HERE/check_stress.py"; then fail=1; fi
+echo "--- страница по вкладкам: настройки по разделам, кнопки по состоянию, остановка с частями ---"
+if ! python3 "$HERE/check_tabs.py"; then fail=1; fi
 echo "--- уборка томов: старое удаляется, журналы не растут ---"
 if ! python3 "$HERE/check_housekeeping.py"; then fail=1; fi
 echo "--- профили Google Colab: переключение, сбои, пауза ---"

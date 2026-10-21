@@ -23,11 +23,15 @@ MODE_PARTS = "parts"
 MODES = {MODE_BOOK: "одна книга целиком, без нарезки",
          MODE_PARTS: "с разбивкой на части"}
 VOICES = {"one": "один голос (рассказчик)", "multi": "многоголосая: роли через LLM"}
+# Ударения и ё (стадия stress на машине Colab). Словари — davnozdu/supertonic-dictionaries.
+STRESS = {"silero": "Silero (как раньше)",
+          "dictionary": "только словарь Supertonic",
+          "arbiter": "Silero + словарь, споры решает LLM"}
 LLM_PROVIDERS = ("ollama", "deepseek")
 SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме пусто — значит «не менять»
 DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
-            "ollama_key": "", "deepseek_key": "", "llm_models": {}}
+            "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero"}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 HOURS_MIN, HOURS_MAX = 0.5, 12.0
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое
@@ -89,6 +93,11 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
         clean["voices"] = voices
     elif values.get("voices"):
         problems.append(f"неизвестный режим голосов «{voices}»")
+    stress = str(values.get("stress", DEFAULTS["stress"])).strip()
+    if stress in STRESS:
+        clean["stress"] = stress
+    elif values.get("stress"):
+        problems.append(f"неизвестный способ расстановки ударений «{stress}»")
     provider = str(values.get("llm_provider", DEFAULTS["llm_provider"])).strip()
     if provider in LLM_PROVIDERS:
         clean["llm_provider"] = provider
@@ -176,6 +185,10 @@ class Settings:
         return self.values.get("voices", "one")
 
     @property
+    def stress(self) -> str:
+        return self.values.get("stress", "silero")
+
+    @property
     def llm_provider(self) -> str:
         return self.values.get("llm_provider", "ollama")
 
@@ -209,7 +222,10 @@ class Settings:
                 f"профилей Colab: {self.profiles}, хранить завершённое {self.keep_days} дн., "
                 f"голоса: {VOICES[self.voices]}"
                 + (f" ({self.llm_provider}, {self.llm_model}, ключ {'есть' if self.llm_key else 'НЕТ'})"
-                   if self.voices == "multi" else ""))
+                   if self.voices == "multi" else "")
+                + f", ударения: {STRESS[self.stress]}"
+                + (f" ({self.llm_provider}, {self.llm_model}, ключ {'есть' if self.llm_key else 'НЕТ'})"
+                   if self.stress == "arbiter" else ""))
         if self.mode == MODE_BOOK:
             line += " (в этом режиме нарезка не используется)"
         else:

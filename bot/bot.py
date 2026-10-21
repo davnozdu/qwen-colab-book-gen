@@ -897,6 +897,21 @@ class App:
         return {"LLM_PROVIDER": self.settings.llm_provider, "LLM_MODEL": self.settings.llm_model,
                 "LLM_API_KEY": self.settings.llm_key}
 
+    def stress_extra(self, job) -> list:
+        """Как ставить ударения и ё на машине: режим из настроек — в журнал и в аргументы задания.
+
+        Silero — прежний путь, аргумент не передаём вовсе. Арбитру нужен ключ LLM (тот же, что у
+        многоголосой озвучки); без ключа конвейер оставит споры гибриду, а мы об этом предупредим.
+        """
+        mode = self.settings.stress
+        line = f"ударения и ё: {bot_settings.STRESS[mode]}"
+        if mode == "arbiter":
+            line += (f" ({llm.PROVIDERS[self.settings.llm_provider]}, {self.settings.llm_model})"
+                     if self.settings.llm_key else
+                     f" — но ключа {llm.PROVIDERS[self.settings.llm_provider]} нет: споры решит гибрид словаря и Silero")
+        job.log_line(line)
+        return [] if mode == "silero" else ["--stress", mode]
+
     def start_cast(self, job, book: pathlib.Path) -> None:
         """Первая машина: ключ LLM — заданию через окружение, не в командную строку."""
         folder = pathlib.Path(job.meta.get("pack_dir") or self.voice_packs.folder(book))
@@ -1848,6 +1863,9 @@ class App:
         очередь видит их как обычные задания, и «остановил» превратилось бы в «остановил только
         то, что идёт сейчас».
         """
+        cast = self.jobs.by_id(job.meta.get("cast_job") or "")
+        if cast is not None and cast.status in ("queued", "running"):
+            self.stop_one(cast)                 # книга ждала голоса: гасим и машину с разметкой ролей
         chain = self.chains.by_id(job.meta.get("chain") or "")
         if chain is not None and not job.meta.get("part_index"):
             for part in chain.parts:
@@ -1866,7 +1884,8 @@ class App:
                              "note": "остановлено вручную"})
             job.save()
             return "части остановлены, нарезка осталась в томе"
-        self.jobs.stop(job)
+        if job.status not in ("queued", "casting", "choice", "choice_voices", "paused"):
+            self.jobs.stop(job)                 # у ждущего задания машины ещё нет — гасить нечего
         job.meta.update({"status": "stopped", "finished": time.time(), "note": "остановлено вручную"})
         job.save()
         return f"машина {job.meta['session']} освобождена"
@@ -1874,7 +1893,7 @@ class App:
     def stop_all_jobs(self) -> str:
         """Останавливает всё: текущую сборку, очередь, части и машины Colab на них."""
         jobs = [job for job in self.jobs.load()
-                if job.status in ("running", "queued", "splitting", "waiting")]
+                if job.status in ("running", "queued", "splitting", "waiting", "casting")]
         if not jobs:
             return "Останавливать нечего: сейчас ничего не собирается."
         # Сначала книги с частями: их остановка сама гасит и части, и цепочку.
@@ -1957,12 +1976,10 @@ class App:
             return
         self.bot.send(chat, text)
 
-    def stop_for_web(self, job) -> None:
-        """Остановка задания со страницы: то же самое, что делает /stop в Telegram."""
-        self.jobs.stop(job)
-        job.meta.update({"status": "stopped", "finished": time.time(),
-                         "note": "остановлено со страницы"})
-        job.save()
+    def stop_for_web(self, job) -> str:
+        """Остановка задания со страницы: то же самое, что делает /stop в Telegram — книга по частям
+        останавливается вместе с частями, ждущая голосов — вместе с машиной разметки."""
+        return self.stop_one(job)
 
     # ────────────────────────────── книги ──────────────────────────────
     def accept_document(self, chat_id, document: dict) -> None:
@@ -2103,13 +2120,14 @@ class App:
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
                                        "--parts-dir", str(self.parts_dir(chain))]
-                                + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else []),
+                                + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else [])
+                                + self.stress_extra(job),
                                 secrets=self.llm_secrets())
                 return
             pack = self.voice_pack_for(job, book)
             if pack is self.WAITING:
                 return                            # сначала голоса: озвучка — после первой машины
-            voices_extra = ["--voice-pack", str(pack)] if pack else []
+            voices_extra = (["--voice-pack", str(pack)] if pack else []) + self.stress_extra(job)
             split = job.meta.get("split")
             if split == "whole":
                 # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
@@ -2246,7 +2264,8 @@ def main() -> int:
         import web
         port = int(os.environ.get("WEB_PORT", "8090"))
         page = web.WebApp(app.jobs, max_hours=SHRINK_HOURS, launch=app.launch,
-                          stop=app.stop_for_web, login=app.colab, notify=app.notify_owner,
+                          stop=app.stop_for_web, stop_all=app.stop_all_jobs,
+                          login=app.colab, notify=app.notify_owner,
                           settings=app.settings, chains=app.chains,
                           continue_chain=app.continue_chain, glue=app.glue_chain,
                           ask_split=app.ask_split, choose_split=app.choose_split,

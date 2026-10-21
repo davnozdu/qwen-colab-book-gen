@@ -43,27 +43,28 @@ def rows(text: str, kind: str) -> list:
     return re.findall(r'<tr><td><a href="/(?:file|result)/[^"]+">([^<]+)</a>', card)
 
 
-main = get("/")
-check("на главной книги — по 10 на страницу", len(rows(main, "books")) == 10, str(rows(main, "books")))
-check("архивы — тоже по 10", len(rows(main, "results")) == 10)
+books_tab, results_tab = get("/files"), get("/results")
+check("на вкладке «Книги» — по 10 на страницу", len(rows(books_tab, "books")) == 10, str(rows(books_tab, "books")))
+check("на вкладке «Готовое» архивы — тоже по 10", len(rows(results_tab, "results")) == 10)
 check("у каждого списка поле поиска, которое ищет без Enter",
-      main.count('class="search"') == 3 and "addEventListener('input'" in main)
+      all(tab.count('class="search"') == 1 for tab in (get("/"), books_tab, results_tab))
+      and "addEventListener('input'" in books_tab)
+check("вкладки на месте, открытая подсвечена",
+      all(f'href="{path}"' in books_tab for path in ("/", "/files", "/results", "/voices", "/colab", "/settings"))
+      and '<a href="/files" class="on">' in books_tab)
 third = get("/files?bpage=3")
 check("третья страница книг — оставшиеся 6", len(rows(third, "books")) == 6, str(rows(third, "books")))
-check("листание книг не сбрасывает поиск в архивах",
-      'rq=%D0%B0%D1%80%D1%85%D0%B8%D0%B2' in get("/?rq=архив&bpage=1").split('id="list-books"', 1)[1].split("</div></div>")[0]
-      or "rq=" in get("/?rq=архив").split('id="list-books"', 1)[1])
-found = get("/?bq=книга-07")
+found = get("/files?bq=книга-07")
 check("поиск находит книгу по части названия", rows(found, "books") == ["книга-07.epub"], str(rows(found, "books")))
-check("поиск не различает «ё» и «е» и регистр", rows(get("/?bq=ЕЛКА"), "books") == ["Ёлка и ёжик.epub"])
-check("ничего не нашлось — так и написано", "Ничего не нашлось." in get("/?bq=нет-такой"))
+check("поиск не различает «ё» и «е» и регистр", rows(get("/files?bq=ЕЛКА"), "books") == ["Ёлка и ёжик.epub"])
+check("ничего не нашлось — так и написано", "Ничего не нашлось." in get("/files?bq=нет-такой"))
 fragment = get("/fragment/books?bq=книга-1&base=/files")
 check("поиск на лету получает только таблицу списка, без шапки страницы",
       '<div class="list-body">' in fragment and "<h1>" not in fragment and len(rows(fragment, "books")) == 10)
 paged = get("/fragment/books?bq=книга&base=/files")
 check("ссылки страниц из поиска ведут туда же и с тем же запросом",
       'href="/files?bq=%D0%BA%D0%BD%D0%B8%D0%B3%D0%B0&amp;bpage=2"' in paged, paged[paged.find("pager"):][:200])
-check("слишком большой номер страницы не даёт пустой список", len(rows(get("/?bpage=99"), "books")) == 6)
+check("слишком большой номер страницы не даёт пустой список", len(rows(get("/files?bpage=99"), "books")) == 6)
 
 code, _, _, headers = page.route("POST", "/book/delete/книга-01.epub?back=/files")
 check("кнопка «удалить» убирает книгу из папки", not (jobs.books / "книга-01.epub").exists()
@@ -73,14 +74,17 @@ busy = jobs.add("книга-02.epub", "555", jobs.books / "книга-02.epub")
 busy.meta["status"] = "running"
 busy.save()
 check("у книги в работе вместо «удалить» — «в работе»",
-      "в работе" in get("/?bq=книга-02") and "/book/delete/" not in get("/?bq=книга-02").split('id="list-books"', 1)[1].split("</table>")[0])
+      "в работе" in get("/files?bq=книга-02")
+      and "/book/delete/" not in get("/files?bq=книга-02").split('id="list-books"', 1)[1].split("</table>")[0])
+check("и «запустить» у книги в работе нет — второй раз её не запустить",
+      "/run/" not in get("/files?bq=книга-02").split('id="list-books"', 1)[1].split("</table>")[0])
 page.route("POST", "/book/delete/книга-02.epub")
 check("книгу в работе удалить нельзя даже прямым запросом", (jobs.books / "книга-02.epub").exists())
 page.route("POST", "/result/delete/архив-01.zip")
 check("архив тоже удаляется", not (jobs.results / "архив-01.zip").exists())
 page.route("POST", "/book/delete/..%2F..%2Fdata%2Fsettings.json")
 check("удалить можно только файл из папки, не выше", (work / "data").is_dir())
-check("подтверждение перед удалением", "confirm('Удалить книгу" in get("/"))
+check("подтверждение перед удалением", "confirm('Удалить книгу" in get("/files"))
 
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
