@@ -81,8 +81,9 @@ HELP = """Я собираю аудиокниги через Google Colab.
 «Войти в Colab», «Сбросить вход», «Профили», «Остановить всё», «Помощь»: нажимайте кнопку,
 команды помнить не нужно.
 
-Профили — несколько аккаунтов Google Colab. Если сборка падает дважды подряд, бот сам переходит
-на следующий профиль; прошёл все — ставит книгу на паузу и пишет об этом.
+Профили — несколько аккаунтов Google Colab. Книга по частям идёт по кругу: после заданного числа
+частей на одном аккаунте (по умолчанию 2) — следующий профиль. Сборка упала — сразу следующий
+профиль; упали все — пауза, и через заданное время (по умолчанию 4 ч) бот сам пробует снова.
 """ % (GPU, DRIVE_DIR, f"{SHRINK_HOURS:g}")
 
 # Инлайн-кнопки под сообщением: видны сразу под ответом (в истории чата остаются).
@@ -427,6 +428,7 @@ class App:
             else:
                 self.report(job)
         self.resume_after_login()
+        self.scheduled_retries()
         self.voices_timeouts()
         self.casting_pass()
         if self.profiles.enabled and self.profiles.active() > self.profiles.count() \
@@ -603,9 +605,102 @@ class App:
         number = self.profiles.next_after(tried) if self.profiles.enabled else 0
         if not number:
             return "exhausted", 0
+        self.switch_profile(number)
+        return ("switch" if self.profiles.signed_in(number) else "login"), number
+
+    def failures_allowed(self) -> int:
+        """Сколько сбоев подряд терпим на одном профиле. Профилей несколько — ни одного лишнего:
+        упала — сразу следующий по кругу. Профиль один — переходить некуда, повторяем на нём же."""
+        return 1 if self.profiles.enabled and self.profiles.count() > 1 else FAILS_PER_PROFILE
+
+    def switch_profile(self, number: int) -> None:
+        """Переключиться на профиль; счёт частей подряд у него начинается с нуля."""
         self.colab.drop()
         self.profiles.activate(number)
-        return ("switch" if self.profiles.signed_in(number) else "login"), number
+        self.state["profile_streak"] = {"profile": number, "parts": 0}
+        self.save_state()
+
+    def next_signed_in(self) -> int:
+        """Следующий по кругу профиль со входом (после активного); 0 — других со входом нет."""
+        if not self.profiles.enabled:
+            return 0
+        count, current = self.profiles.count(), self.profiles.active()
+        for step in range(1, count):
+            candidate = (current - 1 + step) % count + 1
+            if self.profiles.signed_in(candidate):
+                return candidate
+        return 0
+
+    def count_part(self, part_job) -> None:
+        """Часть готова: +1 к счёту частей подряд на профиле, под которым она шла (один раз)."""
+        number = int(part_job.meta.get("profile") or 0)
+        if not number or part_job.meta.get("counted"):
+            return
+        streak = dict(self.state.get("profile_streak") or {})
+        if streak.get("profile") != number:
+            streak = {"profile": number, "parts": 0}
+        streak["parts"] = int(streak.get("parts") or 0) + 1
+        self.state["profile_streak"] = streak
+        self.save_state()
+        part_job.meta["counted"] = True
+        part_job.save()
+
+    def rotate_if_due(self, job) -> None:
+        """Перед частью книги: на активном аккаунте уже N частей подряд — следующий по кругу.
+
+        Бесплатный Colab даёт аккаунту ограниченное время GPU: лучше уйти самим, чем ждать, пока
+        машину отберут посреди части. Счёт общий для всех книг — лимит у аккаунта, а не у книги.
+        """
+        limit = self.settings.parts_per_profile
+        if not limit or not self.profiles.enabled or self.profiles.count() < 2 or self.machine_busy():
+            return
+        current = self.profiles.active()
+        streak = self.state.get("profile_streak") or {}
+        done = int(streak.get("parts") or 0) if streak.get("profile") == current else 0
+        if done < limit:
+            return
+        number = self.next_signed_in()
+        if not number:
+            job.log_line(f"на профиле {current} уже {done} част. подряд, но в другие профили не выполнен "
+                         f"вход — остаюсь на нём")
+            return
+        self.switch_profile(number)
+        line = (f"на {self.profile_label(current)} уже {done} част. подряд — дальше "
+                f"{self.profile_label(number)}")
+        job.log_line(line)
+        self.send_to_job_chat(job, f"🔁 «{job.meta['name']}»: {line}.")
+
+    def retry_later(self) -> tuple:
+        """Все аккаунты упали: когда пробовать снова — (метка времени, «ЧЧ:ММ»); (0, "") — ждём вас."""
+        hours = self.settings.retry_hours
+        if not hours:
+            return 0, ""
+        when = time.time() + hours * 3600
+        return when, time.strftime("%d.%m %H:%M", time.localtime(when))
+
+    def scheduled_retries(self) -> None:
+        """Подошло время повтора после «упали все аккаунты»: круг заново со следующего профиля."""
+        now = time.time()
+        due_jobs = [job for job in self.jobs.load()
+                    if job.status == "paused" and 0 < float(job.meta.get("retry_at") or 0) <= now]
+        due_chains = [chain for chain in self.chains.active()
+                      if chain.status == chains.FAILED and 0 < float(chain.meta.get("retry_at") or 0) <= now]
+        if not due_jobs and not due_chains:
+            return
+        if not self.machine_busy():
+            number = self.next_signed_in()
+            if number:
+                self.switch_profile(number)
+        for job in due_jobs:
+            message = self.resume_job(job.id)
+            job.log_line("повтор по расписанию: прошло время ожидания после сбоя на всех аккаунтах")
+            self.send_to_job_chat(job, "⏰ " + message)
+        for chain in due_chains:
+            message = self.continue_chain(chain.id)
+            job = self.jobs.by_id(chain.meta.get("job") or "")
+            if job is not None:
+                job.log_line("повтор по расписанию: прошло время ожидания после сбоя на всех аккаунтах")
+                self.send_to_job_chat(job, "⏰ Время ожидания вышло — пробую снова. " + message)
 
     def after_failure(self, job) -> None:
         """Сборка упала: второй раз на том же профиле, затем следующий профиль, затем пауза.
@@ -618,9 +713,11 @@ class App:
         current = self.profiles.active()
         label = self.profile_label(current)
         failures = int(job.meta.get("profile_failures") or 0) + 1
-        if failures < FAILS_PER_PROFILE:
+        allowed = self.failures_allowed()
+        fell = "упала" if allowed == 1 else f"упала {allowed} раза"
+        if failures < allowed:
             job.meta["profile_failures"] = failures
-            self.requeue(job, f"сбой на {label} ({failures} из {FAILS_PER_PROFILE}): {reason} — повторяю")
+            self.requeue(job, f"сбой на {label} ({failures} из {allowed}): {reason} — повторяю")
             self.send_to_job_chat(job, f"↻ «{name}» упала на {label}.\nПричина: {reason}\n"
                                        f"Повторяю на том же профиле.")
             return
@@ -629,8 +726,8 @@ class App:
         decision, number = self.next_profile(tried)
         if decision == "switch":
             following = self.profile_label(number)
-            self.requeue(job, f"на {label} упала {FAILS_PER_PROFILE} раза — перехожу на {following}")
-            self.send_to_job_chat(job, f"🔀 «{name}» упала {FAILS_PER_PROFILE} раза на {label}.\n"
+            self.requeue(job, f"на {label} {fell} — перехожу на {following}")
+            self.send_to_job_chat(job, f"🔀 «{name}» {fell} на {label}.\n"
                                        f"Причина: {reason}\nПерехожу на {following} и повторяю.")
             return
         job.meta.update({"status": "paused", "finished": time.time()})
@@ -638,20 +735,27 @@ class App:
             job.meta.update({"await_login": number,
                              "note": f"ждёт входа в профиль {number}; последняя причина: {reason}"})
             job.save()
-            job.log_line(f"на {label} упала {FAILS_PER_PROFILE} раза; следующий профиль {number} без входа — пауза")
-            self.send_to_job_chat(job, f"⏸ «{name}» упала {FAILS_PER_PROFILE} раза на {label}.\n"
+            job.log_line(f"на {label} {fell}; следующий профиль {number} без входа — пауза")
+            self.send_to_job_chat(job, f"⏸ «{name}» {fell} на {label}.\n"
                                        f"Причина: {reason}\n\nСледующий — профиль {number}, но в него не "
                                        f"выполнен вход. Войдите — и сборка продолжится сама.",
                                   buttons=[[(f"🔑 Войти в профиль {number}", f"profile_login:{number}")],
                                            [("▶️ Продолжить", f"resume:{session}"),
                                             ("📜 Журнал", f"log:{session}")]])
             return
-        job.meta["note"] = f"пауза: не справился ни один профиль; последняя причина: {reason}"
+        retry_at, when = self.retry_later()
+        job.meta.update({"retry_at": retry_at,
+                         "note": f"пауза: не справился ни один профиль"
+                                 + (f"; сама продолжу {when}" if when else "") + f"; последняя причина: {reason}"})
         job.save()
-        job.log_line(f"пауза: упала на всех профилях ({', '.join(map(str, tried))})")
+        job.log_line(f"пауза: упала на всех профилях ({', '.join(map(str, tried))})"
+                     + (f"; повтор по расписанию {when}" if when else ""))
         self.send_to_job_chat(job, f"⏸ «{name}»: пауза. Сборка упала на всех профилях "
-                                   f"({', '.join(map(str, tried))}) по {FAILS_PER_PROFILE} раза.\n"
-                                   f"Последняя причина: {reason}\n\n«Продолжить» — пройду по профилям заново.",
+                                   f"({', '.join(map(str, tried))}).\n"
+                                   f"Последняя причина: {reason}\n\n"
+                                   + (f"Сама попробую снова {when} (через {self.settings.retry_hours:g} ч). "
+                                      if when else "")
+                                   + "«Продолжить» — пройду по профилям заново сейчас.",
                               buttons=[[("▶️ Продолжить", f"resume:{session}"), ("📜 Журнал", f"log:{session}")],
                                        [("🏠 Меню", "menu")]])
 
@@ -662,7 +766,7 @@ class App:
             return "Такого задания уже нет."
         if job.status != "paused":
             return f"«{job.meta['name']}» не на паузе — продолжать нечего."
-        for key in ("profile_failures", "profiles_tried", "await_login"):
+        for key in ("profile_failures", "profiles_tried", "await_login", "retry_at"):
             job.meta.pop(key, None)
         self.requeue(job, "продолжаю по вашей команде")
         return f"▶️ «{job.meta['name']}»: продолжаю под {self.profile_label()}."
@@ -757,11 +861,20 @@ class App:
                          (f"🚪 Выйти {number}", f"profile_logout:{number}"),
                          (f"🗑 {number}", f"profile_delete_ask:{number}")])
         rows.append([("➕ Добавить профиль", "profile_add"), ("🚪 Выйти из всех", "profile_logout_all_ask")])
+        per, wait = self.settings.parts_per_profile, self.settings.retry_hours
+        rows.append([("➖", "per_profile:-1"), (f"частей на аккаунт: {per or 'без счёта'}", "profiles"),
+                     ("➕", "per_profile:1")])
+        rows.append([("➖", "retry_hours:-1"), (f"повтор через: {f'{wait:g} ч' if wait else 'не сам'}", "profiles"),
+                     ("➕", "retry_hours:1")])
         rows.append([("🏠 Меню", "menu")])
         head = (text + "\n\n" if text else "") + "Профили Google Colab (▶️ — активный):\n"
+        streak = self.state.get("profile_streak") or {}
+        done = int(streak.get("parts") or 0) if streak.get("profile") == profiles.active() else 0
         self.bot.send(chat_id, head + "\n".join(profiles.lines())
-                      + f"\n\nСборка падает {FAILS_PER_PROFILE} раза подряд — бот сам переходит на "
-                        f"следующий профиль; прошёл все — пауза.", buttons=rows)
+                      + f"\n\nКнига по частям: {self.settings.rotation_line()}."
+                      + (f" На активном уже частей подряд: {done}." if per else "")
+                      + "\nСборка упала — сразу следующий профиль (при одном профиле — повтор на нём).",
+                      buttons=rows)
 
     # ────────────────────────────── многоголосая книга ──────────────────────────────
     WAITING = object()                   # книга ждёт пакет голосов: озвучка — после первой машины
@@ -1090,12 +1203,19 @@ class App:
                 part_job = self.jobs.by_id(part["job_id"])
                 if part_job is None:
                     continue
+                newly_done = False
                 if part_job.status != part.get("status"):
+                    newly_done = part_job.status == chains.PART_DONE
                     part["status"] = part_job.status
                     changed = True
                 if part_job.status == chains.PART_DONE and part_job.meta.get("result"):
                     part["result"] = part_job.meta["result"]
-                    chain.meta.pop("profiles_tried", None)      # часть удалась — круг профилей заново
+                    if newly_done:
+                        # Часть только что удалась — круг профилей заново. Только в этот момент: раньше
+                        # круг сбрасывался на каждом проходе, пока в книге есть готовые части, и упавшая
+                        # часть не вставала на паузу никогда, а крутилась по аккаунтам без конца.
+                        chain.meta.pop("profiles_tried", None)
+                    self.count_part(part_job)                   # +1 к частям подряд на её аккаунте
             if changed:
                 chain.save()
             done = [part for part in chain.parts if part.get("status") == chains.PART_DONE]
@@ -1110,7 +1230,7 @@ class App:
             for part in chain.failed():
                 if self.reglue_part(chain, part, job):
                     return                       # сырьё уже в томе: собираем здесь, машину не трогаем
-                if int(part.get("retries") or 0) < chains.RETRIES:
+                if self.failures_allowed() > 1 and int(part.get("retries") or 0) < chains.RETRIES:
                     part["retries"] = int(part.get("retries") or 0) + 1
                     part["status"] = chains.PART_QUEUED
                     part_job = self.jobs.by_id(part.get("job_id") or "")
@@ -1125,7 +1245,9 @@ class App:
                                                f"упала — повторяю её сам.")
                     return
                 if chain.status != chains.FAILED:
-                    # Дважды на одном профиле — пробуем следующий; круг профилей один на часть.
+                    # Упала на профиле — следующий по кругу (при одном профиле — после повтора на нём же);
+                    # круг профилей один на часть.
+                    fell = "упала" if self.failures_allowed() == 1 else "упала дважды"
                     current = self.profiles.active()
                     label = self.profile_label(current)
                     tried = list(chain.meta.get("profiles_tried") or []) + [current]
@@ -1139,14 +1261,14 @@ class App:
                         if part_job is not None:
                             self.requeue(part_job, f"повтор на {self.profile_label(number)}")
                         chain.save()
-                        job.log_line(f"часть {part['index']} упала дважды на {label} — перехожу на профиль {number}")
-                        self.send_to_job_chat(job, f"🔀 «{job.meta['name']}», часть {part['index']} упала "
-                                                   f"дважды на {label}." + (f"\nПричина: {note}" if note else "")
+                        job.log_line(f"часть {part['index']} {fell} на {label} — перехожу на профиль {number}")
+                        self.send_to_job_chat(job, f"🔀 «{job.meta['name']}», часть {part['index']} {fell} "
+                                                   f"на {label}." + (f"\nПричина: {note}" if note else "")
                                                    + f"\nПерехожу на {self.profile_label(number)} и повторяю.")
                         return
                     if decision == "login":
                         chain.meta["await_login"] = number
-                        reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды на {label}; "
+                        reason = (f"часть {part['index']} из {chain.meta.get('total')} {fell} на {label}; "
                                   f"следующий — профиль {number}, но в него не выполнен вход. Войдите — "
                                   f"и генерация продолжится сама.")
                         chain.hold(reason)
@@ -1159,12 +1281,18 @@ class App:
                                               buttons=[[(f"🔑 Войти в профиль {number}", f"profile_login:{number}")]]
                                               + self.part_buttons(chain, part))
                         return
-                    reason = (f"часть {part['index']} из {chain.meta.get('total')} упала дважды"
+                    retry_at, when = self.retry_later()
+                    reason = (f"часть {part['index']} из {chain.meta.get('total')} {fell}"
                               + (f" на всех профилях ({', '.join(map(str, tried))})" if self.profiles.enabled
                                  else "")
                               + f". Дальше идти нельзя: книга получится с дырой. "
-                              f"Повторить её — кнопкой здесь или «продолжить генерацию» на странице.")
+                              + (f"Сама попробую снова {when} (через {self.settings.retry_hours:g} ч); "
+                                 f"сейчас — кнопкой здесь или «продолжить генерацию» на странице."
+                                 if when else
+                                 f"Повторить её — кнопкой здесь или «продолжить генерацию» на странице."))
                     chain.hold(reason)
+                    chain.meta["retry_at"] = retry_at
+                    chain.save()
                     self.hold_part_jobs(chain)
                     job.meta.update({"status": "waiting", "note": reason})
                     job.save()
@@ -1420,6 +1548,7 @@ class App:
         chain = self.chains.by_id(chain_id)
         if chain is None:
             return "Такой книги с частями уже нет."
+        chain.meta.pop("retry_at", None)
         if not keep_tried:
             chain.meta.pop("profiles_tried", None)
             chain.meta.pop("await_login", None)
@@ -1603,6 +1732,12 @@ class App:
             self.show_voices(chat_id, f"Модель: {self.settings.llm_model}.")
         elif data == "profile_add":
             self.show_profiles(chat_id, self.profile_action("add"))
+        elif data.startswith(("per_profile:", "retry_hours:")):
+            name, _, step = data.partition(":")
+            field = "parts_per_profile" if name == "per_profile" else "retry_hours"
+            limit = bot_settings.PER_PROFILE_MAX if name == "per_profile" else bot_settings.RETRY_MAX
+            value = min(max(getattr(self.settings, field) + int(step), 0), limit)
+            self.show_profiles(chat_id, self.settings.change(**{field: value}))
         elif data.startswith("profile_login:"):
             number = _number(data)
             self.bot.send(chat_id, f"Начинаю вход в профиль {number}, ссылка придёт через несколько секунд…")
@@ -2115,6 +2250,7 @@ class App:
                 if chain is None:
                     raise RuntimeError("книга с частями больше не найдена — начните её заново")
                 job.log_line(self.parts_line(chain, job.meta["part_index"]))
+                self.rotate_if_due(job)
                 self.announce_profile(job)
                 pack = chain.meta.get("voice_pack")
                 self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,

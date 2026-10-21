@@ -31,11 +31,14 @@ LLM_PROVIDERS = ("ollama", "deepseek")
 SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме пусто — значит «не менять»
 DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
-            "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero"}
+            "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero",
+            "parts_per_profile": 2, "retry_hours": 4.0}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 HOURS_MIN, HOURS_MAX = 0.5, 12.0
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое
 PROFILES_MAX = 10                   # аккаунтов Google Colab, между которыми бот переключается
+PER_PROFILE_MAX = 50                # частей подряд на одном аккаунте; 0 — переключаться только при сбое
+RETRY_MAX = 48.0                    # все аккаунты упали — через столько часов круг заново; 0 — ждать человека
 TRUTHY = {"1", "on", "true", "yes", "да", "вкл"}
 
 
@@ -79,6 +82,24 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"профилей Colab — от 1 до {PROFILES_MAX}")
     except (TypeError, ValueError):
         problems.append("число профилей Colab должно быть целым (например, 2)")
+    per_profile = values.get("parts_per_profile", DEFAULTS["parts_per_profile"])
+    try:
+        count = int(float(str(per_profile).replace(",", ".")))
+        if 0 <= count <= PER_PROFILE_MAX:
+            clean["parts_per_profile"] = count
+        else:
+            problems.append(f"частей на один аккаунт — от 0 (не переключать) до {PER_PROFILE_MAX}")
+    except (TypeError, ValueError):
+        problems.append("частей на один аккаунт — целое число (например, 2)")
+    retry = values.get("retry_hours", DEFAULTS["retry_hours"])
+    try:
+        hours = round(float(str(retry).replace(",", ".")), 2)
+        if 0 <= hours <= RETRY_MAX:
+            clean["retry_hours"] = hours
+        else:
+            problems.append(f"пауза, когда упали все аккаунты, — от 0 (ждать вас) до {RETRY_MAX:g} ч")
+    except (TypeError, ValueError):
+        problems.append("пауза, когда упали все аккаунты, — число часов (например, 4)")
     keep = values.get("keep_days", DEFAULTS["keep_days"])
     try:
         days = int(float(str(keep).replace(",", ".")))
@@ -177,6 +198,22 @@ class Settings:
         return int(self.values.get("profiles", DEFAULTS["profiles"]))
 
     @property
+    def parts_per_profile(self) -> int:
+        """Сколько частей подряд идут на одном аккаунте Colab, прежде чем перейти на следующий."""
+        return int(self.values.get("parts_per_profile", DEFAULTS["parts_per_profile"]))
+
+    @property
+    def retry_hours(self) -> float:
+        """Все аккаунты Colab упали — через столько часов бот сам начинает круг заново (0 — не сам)."""
+        return float(self.values.get("retry_hours", DEFAULTS["retry_hours"]))
+
+    def rotation_line(self) -> str:
+        line = (f"по {self.parts_per_profile} част. на аккаунт Colab, дальше следующий по кругу"
+                if self.parts_per_profile else "аккаунт Colab меняется только при сбое")
+        return line + (f"; упали все — повтор через {self.retry_hours:g} ч" if self.retry_hours
+                       else "; упали все — ждём вас")
+
+    @property
     def keep_days(self) -> int:
         return int(self.values.get("keep_days", DEFAULTS["keep_days"]))
 
@@ -219,7 +256,8 @@ class Settings:
         line = (f"режим «{self.title()}», части по {self.parts_hours:g} ч, "
                 f"Google Drive: {'да' if self.drive else 'нет'}, "
                 f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}, "
-                f"профилей Colab: {self.profiles}, хранить завершённое {self.keep_days} дн., "
+                f"профилей Colab: {self.profiles} ({self.rotation_line()}), "
+                f"хранить завершённое {self.keep_days} дн., "
                 f"голоса: {VOICES[self.voices]}"
                 + (f" ({self.llm_provider}, {self.llm_model}, ключ {'есть' if self.llm_key else 'НЕТ'})"
                    if self.voices == "multi" else "")

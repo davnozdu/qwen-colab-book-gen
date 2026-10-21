@@ -474,7 +474,9 @@ class WebApp:
         if method == "POST" and where == "/settings":
             if self.settings is None:
                 return self.redirect("/settings", "Настройки недоступны в этой сборке.")
-            return self.redirect("/settings", self.save_settings(content_type, body))
+            back = (form_fields(content_type, body).get("back") or {}).get("data", b"").decode("utf-8", "replace")
+            return self.redirect(back if back in dict(TABS) else "/settings",
+                                 self.save_settings(content_type, body))
         if method == "POST" and where == "/colab/usage":
             return self.redirect("/colab", self.login_call("usage"))
         return 404, "text/plain; charset=utf-8", "нет такой страницы".encode(), {}
@@ -973,13 +975,31 @@ class WebApp:
                 actions.append(button("delete", number, "удалить", confirm=f"Удалить профиль {number}?"))
             rows.append(f'<tr><td class="name">{mark}Профиль {number}</td><td>{state}</td>'
                         f'<td>{" ".join(actions)}</td></tr>')
+        rotation = ""
+        if self.settings is not None:
+            rotation = (f'<form method="post" action="/settings" style="margin-top:12px">'
+                        f'<input type="hidden" name="back" value="/colab">'
+                        f'<fieldset><legend>Переключение аккаунтов</legend>'
+                        f'<div><label>Частей книги подряд на одном аккаунте</label> '
+                        f'<input type="number" name="parts_per_profile" step="1" min="0" '
+                        f'max="{bot_settings.PER_PROFILE_MAX}" value="{self.settings.parts_per_profile}" '
+                        f'style="width:4em"><div class="hint">потом следующий профиль по кругу (1 → 2 → 3 → 1); '
+                        f'бесплатный Colab даёт аккаунту часа два GPU — уходим сами, не дожидаясь, пока '
+                        f'отберут машину. 0 — менять аккаунт только при сбое</div></div>'
+                        f'<div class="row"><label>Упали все аккаунты — пробовать снова через</label> '
+                        f'<input type="number" name="retry_hours" step="0.5" min="0" '
+                        f'max="{bot_settings.RETRY_MAX:g}" value="{self.settings.retry_hours:g}" '
+                        f'style="width:5em"> ч<div class="hint">0 — ждать, пока вы нажмёте «продолжить»</div></div>'
+                        f'<div class="row"><button type="submit">Сохранить</button></div>'
+                        f'</fieldset></form>')
         return (f'<h2 style="margin-top:16px">Профили</h2>'
-                f'<div class="muted">У каждого профиля свой вход Google. Сборка падает дважды подряд — '
-                f'бот сам переходит на следующий профиль; прошёл все — ставит книгу на паузу. '
-                f'Профиль без входа: бот просит войти в него и продолжает сам.</div>'
+                f'<div class="muted">У каждого профиля свой вход Google. Сборка упала — бот сразу переходит '
+                f'на следующий профиль; упали все — пауза и повтор по расписанию. Профиль без входа: '
+                f'бот просит войти в него и продолжает сам.</div>'
                 f'<table>{"".join(rows)}</table>'
                 f'<div style="margin-top:8px">{button("add", 0, "добавить профиль")} '
-                f'{button("logout_all", 0, "выйти из всех профилей", confirm="Выйти из всех профилей?")}</div>')
+                f'{button("logout_all", 0, "выйти из всех профилей", confirm="Выйти из всех профилей?")}</div>'
+                f'{rotation}')
 
     def eta_page(self, job) -> str:
         """«Сколько осталось» — та же кнопка, что в Telegram: проценты по сегментам и оценка."""
