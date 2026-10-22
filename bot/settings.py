@@ -32,7 +32,7 @@ SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме п
 DEFAULTS = {"mode": MODE_BOOK, "parts_minutes": 60, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
             "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero",
-            "parts_per_profile": 2, "retry_hours": 4.0}
+            "parts_per_profile": 1, "retry_hours": 4.0}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 MINUTES_MIN, MINUTES_MAX = 10, 720     # длина части в минутах звука
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое

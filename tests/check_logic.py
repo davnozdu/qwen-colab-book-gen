@@ -252,6 +252,7 @@ options = settings_mod.Settings(settings_path)
 check("умолчания: книга целиком, части по 60 мин, Drive включён",
       (options.mode, options.parts_minutes, options.drive) == (settings_mod.MODE_BOOK, 60, True)
       and options.parts_hours == 1 and "части по 60 мин" in options.summary()
+      and options.parts_per_profile == 1
       and "одна книга целиком" in options.summary(), options.summary())
 message = options.update({"mode": "parts", "parts_hours": "2.5", "drive": "off"})
 check("настройки меняются и сохраняются в том",
