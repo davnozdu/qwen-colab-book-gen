@@ -345,7 +345,10 @@ class Jobs:
         return [job for job in self.load() if job.status == "running" and self.alive(job)]
 
     def free_slot(self) -> bool:
-        return len(self.live_running()) < self.max_jobs
+        """Можно ли брать следующее из очереди: есть место и на Colab сейчас не идёт машина
+        (очередь — это задания для машины; вторую одновременно не поднимаем)."""
+        live = self.live_running()
+        return len(live) < self.max_jobs and not any(not job.meta.get("local") for job in live)
 
     def interrupted(self) -> list:
         """На старте бота: задания, которые оборвал перезапуск контейнера (обновление образа).
@@ -396,6 +399,9 @@ class Jobs:
                 and item.status == "running" and self.alive(item)]
         if len(live) >= self.max_jobs:
             raise RuntimeError("сейчас идёт другая сборка — дождитесь её конца или остановите её")
+        if any(not item.meta.get("local") for item in live):
+            # Машина Colab — всегда одна, что бы ни стояло в MAX_JOBS: за две сразу блокируют аккаунты.
+            raise RuntimeError("на Colab уже идёт машина — вторую одновременно не поднимаю")
         command = ([str(self.entry)] if self.entry else [sys_executable(), str(self.runner)]) + \
                   ["--session", job.meta["session"],
                    "--gpu", gpu, "--drive-dir", drive_dir, "--max-hours", str(max_hours),

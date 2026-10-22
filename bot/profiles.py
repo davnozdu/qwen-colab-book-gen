@@ -105,6 +105,26 @@ class Profiles:
     def folder(self, number: int) -> pathlib.Path:
         return self.path(number) if self.enabled else self.link
 
+    def home(self, number: int) -> pathlib.Path:
+        """HOME, в котором ~/.config/colab-cli — папка именно этого профиля.
+
+        С ним CLI смотрит и гасит машины любого аккаунта, не переключая активный: перед подъёмом
+        машины бот обходит все аккаунты — у Colab за две машины сразу блокируют.
+        """
+        shim = self.root.parent / "colab-homes" / str(int(number))
+        cli = shim / ".config" / LINK_NAME
+        target = self.folder(number).resolve()
+        if not cli.is_symlink() or pathlib.Path(os.readlink(cli)) != target:
+            cli.parent.mkdir(parents=True, exist_ok=True)
+            temp = cli.with_name(f".{LINK_NAME}.{os.getpid()}.tmp")
+            try:
+                temp.unlink()
+            except OSError:
+                pass
+            temp.symlink_to(target)
+            os.replace(temp, cli)
+        return shim
+
     def account(self, number: int) -> str:
         """Адрес Google-аккаунта профиля из кэша (account.json), если он относится к текущему входу."""
         folder = self.folder(number)

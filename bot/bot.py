@@ -514,6 +514,101 @@ class App:
                 self.after_failure(job)          # повтор, следующий профиль или пауза — там же
 
     # ────────────────────────────── профили Colab ──────────────────────────────
+    SESSION_LINE = re.compile(r"^\[([^\]]*)\]\s+(\S+)\s+\|", re.M)
+    MACHINE_RECHECK = 60                # жива чужая машина — проверяем снова не чаще раза в минуту
+
+    def colab_cli(self, number: int, *arguments, timeout: float = 90):
+        """Colab CLI от имени профиля number (не трогая активный). Нет CLI или ошибка — None."""
+        binary = shutil.which("colab")
+        if not binary:
+            return None
+        env = dict(self.jobs.env)
+        if self.profiles.enabled:
+            env["HOME"] = str(self.profiles.home(number))
+        try:
+            return subprocess.run([binary, *arguments], capture_output=True, text=True, timeout=timeout,
+                                  env=env, input="")
+        except Exception:
+            return None
+
+    def machines_alive(self) -> dict:
+        """Живые машины Colab на всех аккаунтах со входом: {профиль: [(сессия, адрес), …]}."""
+        numbers = self.profiles.numbers() if self.profiles.enabled else [1]
+        alive = {}
+        for number in numbers:
+            if self.profiles.enabled and not self.profiles.signed_in(number):
+                continue
+            done = self.colab_cli(number, "sessions")
+            found = self.SESSION_LINE.findall((done.stdout or "") if done is not None else "")
+            if found:
+                alive[number] = found
+        return alive
+
+    def stop_machines(self, number: int, sessions: list) -> None:
+        """Гасит машины профиля. Сессию без имени («?» — машина есть, а в файле CLI её нет) CLI по имени
+        не найдёт: дописываем её в файл сессий профиля и гасим — так же делает обёртка запуска."""
+        state = self.profiles.folder(number) / "sessions.json"
+        for index, (name, endpoint) in enumerate(sessions, 1):
+            if name == "?":
+                name = f"orphan-{index}"
+                try:
+                    data = json.loads(state.read_text(encoding="utf-8")) if state.exists() else {}
+                    data[name] = {"name": name, "token": "", "url": "", "endpoint": endpoint,
+                                  "variant": "GPU", "accelerator": "T4", "machine_shape": "STANDARD"}
+                    state.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                except (OSError, ValueError):
+                    continue
+            self.colab_cli(number, "stop", "-s", name, timeout=180)
+
+    def single_machine_ready(self, job) -> bool:
+        """Перед подъёмом машины: на ВСЕХ аккаунтах не должно быть ни одной живой машины Colab.
+
+        Две машины сразу (пусть и на разных аккаунтах) — повод для блокировки. Осталась машина
+        от прошлого задания (её «stop» не дошёл, обёртку оборвали) — гасим и проверяем ещё раз; не
+        гаснет — новую не поднимаем: задание ждёт в очереди и пробует снова через минуту.
+        """
+        if not shutil.which("colab"):
+            return True                          # CLI нет (проверки, локальный запуск) — нечего сверять
+        if job.meta.get("machine_wait") and time.time() - float(job.meta.get("machine_checked") or 0) \
+                < self.MACHINE_RECHECK:
+            return False
+        alive = self.machines_alive()
+        for number, sessions in alive.items():
+            job.log_line(f"перед запуском: на профиле {number} жива машина Colab "
+                         f"({', '.join(name for name, _ in sessions)}) — гашу: две машины сразу нельзя")
+            self.stop_machines(number, sessions)
+        if alive:
+            alive = self.machines_alive()
+        if alive:
+            first = not job.meta.get("machine_wait")
+            job.meta.update({"machine_wait": True, "machine_checked": time.time()})
+            job.save()
+            where = ", ".join(f"профиль {number}" for number in alive)
+            if first:
+                job.log_line(f"машина Colab не гаснет ({where}) — новую не поднимаю, жду и проверяю каждую минуту")
+                self.send_to_job_chat(job, f"⏳ «{job.meta['name']}»: на {where} ещё жива машина Colab и не "
+                                           f"гаснет. Новую не поднимаю — две сразу нельзя. Проверяю каждую минуту.")
+            return False
+        if job.meta.pop("machine_wait", None):
+            job.meta.pop("machine_checked", None)
+            job.save()
+            job.log_line("других машин Colab нет — запускаю")
+        return True
+
+    def needs_machine(self, job) -> bool:
+        """Поднимет ли запуск этого задания машину Colab. Нарезка книги на части идёт здесь, в
+        контейнере, — ей машина не нужна, и чужая живая машина её не задерживает."""
+        if job.meta.get("cast") or (job.meta.get("part_index") and job.meta.get("chain")):
+            return True
+        if job.meta.get("split") == "whole":
+            return True
+        return not (job.meta.get("split") == "parts" or self.settings.mode == bot_settings.MODE_PARTS)
+
+    def start_on_colab(self, job, book, **options) -> None:
+        """Запуск на машине Colab (что других машин нет, проверено в начале _launch)."""
+        self.announce_profile(job)
+        self.jobs.start(job, book, **options)
+
     def machine_busy(self) -> bool:
         """Идёт ли сборка на машине Colab: под ней профиль не меняем — её сессия в его папке."""
         return any(not job.meta.get("local") for job in self.jobs.live_running())
@@ -1082,10 +1177,9 @@ class App:
         """Первая машина: ключ LLM — заданию через окружение, не в командную строку."""
         folder = pathlib.Path(job.meta.get("pack_dir") or self.voice_packs.folder(book))
         folder.mkdir(parents=True, exist_ok=True)
-        self.announce_profile(job)
-        self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0,
-                        extra=["--cast", "--out-dir", str(folder)],
-                        secrets=self.llm_secrets())
+        self.start_on_colab(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0,
+                            extra=["--cast", "--out-dir", str(folder)],
+                            secrets=self.llm_secrets())
 
     @staticmethod
     def llm_failure(job) -> str:
@@ -2295,6 +2389,10 @@ class App:
                 job.meta["chat_id"] = owner
                 job.save()
         try:
+            # Одна машина Colab на все аккаунты: живая где-то ещё — гасим; не гаснет — ждём. До всего
+            # остального: пока задание ждёт, журнал не засоряется строками о режиме и частях.
+            if self.needs_machine(job) and not self.single_machine_ready(job):
+                return
             if job.meta.get("cast"):
                 self.start_cast(job, book)        # первая машина многоголосой книги
                 return
@@ -2306,9 +2404,8 @@ class App:
                     raise RuntimeError("книга с частями больше не найдена — начните её заново")
                 job.log_line(self.parts_line(chain, job.meta["part_index"]))
                 self.rotate_if_due(job)
-                self.announce_profile(job)
                 pack = chain.meta.get("voice_pack")
-                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
+                self.start_on_colab(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
                                 extra=["--parts-raw", "--part-index", str(job.meta["part_index"]),
                                        "--parts-dir", str(self.parts_dir(chain))]
                                 + (["--voice-pack", pack] if pack and pathlib.Path(pack).is_file() else [])
@@ -2323,18 +2420,16 @@ class App:
             if split == "whole":
                 # Ответ «нет, одним файлом»: машина не режет книгу и сама (порог 0 — не резать).
                 job.log_line("режим: одна книга целиком — так решили на вопрос «резать ли»")
-                self.announce_profile(job)
-                self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0, extra=voices_extra,
-                                secrets=self.llm_secrets())
+                self.start_on_colab(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=0, extra=voices_extra,
+                                    secrets=self.llm_secrets())
                 return
             if (split == "parts" or self.settings.mode == bot_settings.MODE_PARTS) \
                     and not job.meta.get("part_index"):
                 self.start_chain(job, book)
                 return
             job.log_line(self.settings.job_line())
-            self.announce_profile(job)
-            self.jobs.start(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS, extra=voices_extra,
-                            secrets=self.llm_secrets())
+            self.start_on_colab(job, book, gpu=GPU, drive_dir=DRIVE_DIR, max_hours=SHRINK_HOURS,
+                                extra=voices_extra, secrets=self.llm_secrets())
         except Exception as exc:
             job.meta.update({"status": "failed", "note": f"не удалось запустить: {exc}"})
             job.save()

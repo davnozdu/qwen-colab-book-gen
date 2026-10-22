@@ -216,6 +216,8 @@ echo "--- страница по вкладкам: настройки по раз
 if ! python3 "$HERE/check_tabs.py"; then fail=1; fi
 echo "--- обновление образа: прерванное продолжается само, только незаконченная часть ---"
 if ! python3 "$HERE/check_restart.py"; then fail=1; fi
+echo "--- одна машина Colab на все аккаунты: оставшиеся гасим, не гаснет — ждём ---"
+if ! python3 "$HERE/check_one_machine.py"; then fail=1; fi
 echo "--- уборка томов: старое удаляется, журналы не растут ---"
 if ! python3 "$HERE/check_housekeeping.py"; then fail=1; fi
 echo "--- профили Google Colab: переключение, сбои, пауза ---"
