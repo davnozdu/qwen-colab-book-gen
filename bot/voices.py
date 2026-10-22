@@ -69,7 +69,8 @@ class VoicePacks:
                            "sample": str(wav) if wav.is_file() else "",
                            "text": str(voice.get("sample_text") or "")})
         return {"key": folder.name, "title": (cast.get("book") or {}).get("title") or "",
-                "llm": cast.get("llm") or {}, "voices": voices}
+                "llm": cast.get("llm") or {}, "voices": voices,
+                "dropped": list(cast.get("dropped_voices") or [])}
 
     def recent(self, limit: int = 3) -> list:
         if not self.root.is_dir():

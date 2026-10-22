@@ -1257,8 +1257,14 @@ class App:
         job.log_line(f"голоса готовы: героев {len(heroes)} — " + ", ".join(v["name"] for v in heroes))
         lines = [f"• {v['name']} — реплик {v['lines']}" + (f": {v['about']}" if v["about"] else "")
                  for v in heroes]
+        dropped = described.get("dropped") or []
+        if dropped:
+            job.log_line("не получились голоса: " + ", ".join(f"{d['name']} → {d['given_to']}" for d in dropped))
         self.send_to_job_chat(job, f"🎭 «{job.meta['name']}»: голоса готовы — героев {len(heroes)}, рассказчик "
                                    f"прежний.\n" + "\n".join(lines[:40])
+                                   + ("\n\n⚠️ Не получились образцы голосов — их реплики читает запасной голос:\n"
+                                      + "\n".join(f"• {d['name']} → {d['given_to']}" for d in dropped)
+                                      if dropped else "")
                                    + "\n\nОбразцы голосов — на странице. Начинаю озвучку.")
         # Сами образцы в Telegram не шлём: на книгу их до пятнадцати, а слушают их на странице.
 

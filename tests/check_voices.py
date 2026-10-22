@@ -98,7 +98,9 @@ def make_pack(folder: pathlib.Path) -> pathlib.Path:
     cast = {"format": "qwen-voice-cast", "book": {"title": "Книга"}, "llm": {"provider": "ollama", "model": "m"},
             "voices": [{"id": "narrator", "name": "Рассказчик", "fixed": True, "lines": 30},
                        {"id": "petya", "name": "Петя", "lines": 12, "sample_text": "Не хочу.",
-                        "profile": {"personality": "упрямый мальчик"}}]}
+                        "profile": {"personality": "упрямый мальчик"}}],
+            "dropped_voices": [{"id": "harris", "name": "Мать мальчиков Харрис", "given_to": "Прочие женские голоса",
+                                "reason": "образец длиннее 10 с"}]}
     with zipfile.ZipFile(zip_path, "w") as z:
         z.writestr("cast.json", json.dumps(cast, ensure_ascii=False))
         z.writestr("voices/petya.wav", b"RIFF fake wav")
@@ -145,6 +147,8 @@ job = app.jobs.by_id(job.id)
 check("пакет пришёл — книга снова в очереди с пакетом", job.status == "queued" and job.meta.get("voice_pack") == str(pack_zip))
 check("в Telegram — состав героев, без аудио-образцов",
       said(app.bot.sent, "голоса готовы", "Петя", "реплик 12") and not app.bot.audio, str(app.bot.sent))
+check("и сказано, чей голос не получился и кто читает его реплики",
+      said(app.bot.sent, "Не получились", "Мать мальчиков Харрис → Прочие женские голоса"), str(app.bot.sent))
 app.launch(job)
 check("и с ключом LLM — для прочтения иностранных вставок", started[-1]["secrets"].get("LLM_API_KEY") == "ollama-secret-1234")
 check("озвучка идёт с --voice-pack", started[-1]["job"] == job.id and started[-1]["extra"][-2:] == ["--voice-pack", str(pack_zip)])
