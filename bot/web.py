@@ -651,7 +651,7 @@ class WebApp:
             cards.append(f'<div class="card"><h2>Книга по частям: '
                          f'{html.escape(str(chain.meta.get("name") or ""))}</h2>'
                          f'<div class="muted">{html.escape(chain.summary())} · порог '
-                         f'{float(chain.meta.get("parts_hours") or 0):g} ч · частей в томе: '
+                         f'{round(float(chain.meta.get("parts_hours") or 0) * 60)} мин · частей в томе: '
                          f'{len(chain.parts)}</div>'
                          f'<table style="margin-top:8px">'
                          f'<tr><th>Часть</th><th>Состояние</th><th>Действия</th></tr>'
@@ -735,7 +735,7 @@ class WebApp:
         if self.settings is None:
             return f"Книги длиннее {self.max_hours:g} ч режутся на части автоматически."
         if self.settings.mode == bot_settings.MODE_PARTS:
-            return (f"Режим «с разбивкой на части»: книги длиннее {self.settings.parts_hours:g} ч "
+            return (f"Режим «с разбивкой на части»: книги длиннее {self.settings.parts_minutes} мин "
                     f"собираются по частям, склейка — в конце.")
         return "Режим «одна книга целиком»: книга идёт одним прогоном, без нарезки."
 
@@ -749,7 +749,7 @@ class WebApp:
             for value, title in bot_settings.MODES.items())
         note = ""
         if self.settings.mode == bot_settings.MODE_PARTS:
-            note = (f'<div class="note row">Режим частей: книгу длиннее {self.settings.parts_hours:g} ч бот '
+            note = (f'<div class="note row">Режим частей: книгу длиннее {self.settings.parts_minutes} мин бот '
                     f'режет по абзацам; каждая часть уходит в облако только на синтез, сырьё '
                     f'возвращается в том, готовая часть приходит архивом. Когда готовы все части — '
                     f'склейка, громкость, музыка и сборка книги здесь, в контейнере. Google Drive в '
@@ -760,8 +760,8 @@ class WebApp:
                 f'<fieldset><legend>Как собирать книгу</legend>'
                 f'<div><label>Как обрабатывать книги</label> <select name="mode">{options}</select></div>'
                 f'<div class="row"><label>Длинные книги резать на части по</label> '
-                f'<input type="number" name="parts_hours" step="0.5" min="0.5" max="12" '
-                f'value="{self.settings.parts_hours:g}" style="width:5em"> ч'
+                f'<input type="number" name="parts_minutes" step="5" min="{bot_settings.MINUTES_MIN}" '
+                f'max="{bot_settings.MINUTES_MAX}" value="{self.settings.parts_minutes}" style="width:5em"> мин'
                 f'<div class="hint">действует только в режиме «с разбивкой на части»</div></div>'
                 f'<div class="row"><label>'
                 f'<input type="checkbox" name="drive"{" checked" if self.settings.drive else ""}> '
@@ -805,7 +805,7 @@ class WebApp:
         if job.status in ("splitting", "waiting", "gluing") and chain is not None:
             # Книга с частями: строки журнала тут ни о чём — важно, где цепочка.
             tail = (f'<div class="muted">{html.escape(chain.summary())} · порог '
-                    f'{float(chain.meta.get("parts_hours") or 0):g} ч</div>')
+                    f'{round(float(chain.meta.get("parts_hours") or 0) * 60)} мин</div>')
         elif job.status == "running":
             lines = [line.strip() for line in job.tail(400).splitlines() if line.strip()]
             progress = job.progress()

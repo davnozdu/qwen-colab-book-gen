@@ -29,12 +29,12 @@ STRESS = {"silero": "Silero (как раньше)",
           "arbiter": "Silero + словарь, споры решает LLM"}
 LLM_PROVIDERS = ("ollama", "deepseek")
 SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме пусто — значит «не менять»
-DEFAULTS = {"mode": MODE_BOOK, "parts_hours": 1.5, "drive": True, "stall_minutes": 30, "profiles": 1,
+DEFAULTS = {"mode": MODE_BOOK, "parts_minutes": 60, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
             "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero",
             "parts_per_profile": 2, "retry_hours": 4.0}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
-HOURS_MIN, HOURS_MAX = 0.5, 12.0
+MINUTES_MIN, MINUTES_MAX = 10, 720     # длина части в минутах звука
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое
 PROFILES_MAX = 10                   # аккаунтов Google Colab, между которыми бот переключается
 PER_PROFILE_MAX = 50                # частей подряд на одном аккаунте; 0 — переключаться только при сбое
@@ -55,15 +55,19 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
         clean["mode"] = mode
     elif values.get("mode"):
         problems.append(f"неизвестный режим «{mode}»")
-    hours = values.get("parts_hours", DEFAULTS["parts_hours"])
+    # Длина части — в минутах. Прежние настройки (и прежние формы) хранили часы: parts_hours,
+    # если он есть, переводим в минуты — 1.5 ч станут 90 мин, а не сбросятся на умолчание.
     try:
-        number = round(float(str(hours).replace(",", ".")), 2)
-        if HOURS_MIN <= number <= HOURS_MAX:
-            clean["parts_hours"] = number
+        if values.get("parts_hours") not in (None, ""):
+            minutes = round(float(str(values["parts_hours"]).replace(",", ".")) * 60)
         else:
-            problems.append(f"порог части должен быть от {HOURS_MIN:g} до {HOURS_MAX:g} ч")
+            minutes = round(float(str(values.get("parts_minutes", DEFAULTS["parts_minutes"])).replace(",", ".")))
+        if MINUTES_MIN <= minutes <= MINUTES_MAX:
+            clean["parts_minutes"] = minutes
+        else:
+            problems.append(f"длина части — от {MINUTES_MIN} до {MINUTES_MAX} минут")
     except (TypeError, ValueError):
-        problems.append("порог части должен быть числом (например, 1.5)")
+        problems.append("длина части — число минут (например, 60)")
     stall = values.get("stall_minutes", DEFAULTS["stall_minutes"])
     try:
         minutes = int(float(str(stall).replace(",", ".")))
@@ -182,8 +186,13 @@ class Settings:
         return self.values["mode"]
 
     @property
+    def parts_minutes(self) -> int:
+        return int(self.values.get("parts_minutes", DEFAULTS["parts_minutes"]))
+
+    @property
     def parts_hours(self) -> float:
-        return float(self.values["parts_hours"])
+        """Для нарезки (shrink_book --max-hours) — те же минуты, в часах."""
+        return self.parts_minutes / 60
 
     @property
     def drive(self) -> bool:
@@ -253,7 +262,7 @@ class Settings:
         return MODES[self.mode]
 
     def summary(self) -> str:
-        line = (f"режим «{self.title()}», части по {self.parts_hours:g} ч, "
+        line = (f"режим «{self.title()}», части по {self.parts_minutes} мин, "
                 f"Google Drive: {'да' if self.drive else 'нет'}, "
                 f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}, "
                 f"профилей Colab: {self.profiles} ({self.rotation_line()}), "
@@ -273,6 +282,6 @@ class Settings:
     def job_line(self) -> str:
         """Строка в журнал задания: по журналу должно быть видно, каким путём пошла книга."""
         if self.mode == MODE_PARTS:
-            return (f"режим: с разбивкой на части — книги длиннее {self.parts_hours:g} ч будут "
+            return (f"режим: с разбивкой на части — книги длиннее {self.parts_minutes} мин будут "
                     f"собираться по частям, склейка в конце")
-        return f"режим: одна книга целиком, без нарезки (порог {self.parts_hours:g} ч не действует)"
+        return f"режим: одна книга целиком, без нарезки (порог {self.parts_minutes} мин не действует)"

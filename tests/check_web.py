@@ -205,7 +205,8 @@ after = get("/settings")[1]
 check("режим переключается на «с разбивкой на части»",
       code == 303 and "режим «с разбивкой на части»".encode() in after, f"код {code}")
 check("и страница объясняет, что делает режим частей",
-      "Режим частей: книгу длиннее 2 ч".encode() in after
+      "Режим частей: книгу длиннее 120 мин".encode() in after
+      and 'name="parts_minutes"'.encode() in after
       and "Путь частей ещё собирается".encode() not in after)
 
 code, _, _ = post_form("/settings", {"mode": "book", "parts_hours": "99", "drive": "on"})

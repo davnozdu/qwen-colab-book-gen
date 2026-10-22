@@ -249,8 +249,9 @@ check("команда /eta отвечает процентами и остатк
 # ── настройки обработки: режим, порог нарезки, Drive ─────────────────────
 settings_path = work / "settings.json"
 options = settings_mod.Settings(settings_path)
-check("умолчания: книга целиком, части по 1.5 ч, Drive включён",
-      (options.mode, options.parts_hours, options.drive) == (settings_mod.MODE_BOOK, 1.5, True)
+check("умолчания: книга целиком, части по 60 мин, Drive включён",
+      (options.mode, options.parts_minutes, options.drive) == (settings_mod.MODE_BOOK, 60, True)
+      and options.parts_hours == 1 and "части по 60 мин" in options.summary()
       and "одна книга целиком" in options.summary(), options.summary())
 message = options.update({"mode": "parts", "parts_hours": "2.5", "drive": "off"})
 check("настройки меняются и сохраняются в том",
@@ -261,15 +262,23 @@ check("настройки переживают перезапуск (читаю�
 bad_options = options.update({"mode": "what", "parts_hours": "99", "drive": "on"})
 check("неправильные настройки не применяются и объясняют причину",
       options.mode == settings_mod.MODE_PARTS and options.parts_hours == 2.5 and not options.drive
-      and "не изменены" in bad_options and "режим" in bad_options and "порог" in bad_options,
+      and "не изменены" in bad_options and "режим" in bad_options and "длина части" in bad_options,
       bad_options)
+options.update({"mode": "parts", "parts_minutes": "45", "drive": "on"})
+check("длина части задаётся в минутах (45 мин — нарезке это 0.75 ч)",
+      options.parts_minutes == 45 and options.parts_hours == 0.75, options.summary())
+check("меньше 10 минут не принимается", "не изменены" in options.update({"mode": "parts", "parts_minutes": "5"}))
+legacy = work / "legacy-settings.json"
+legacy.write_text('{"mode": "parts", "parts_hours": 1.5}', encoding="utf-8")
+check("прежние настройки в часах переводятся в минуты: 1.5 ч → 90 мин",
+      settings_mod.Settings(legacy).parts_minutes == 90)
 settings_path.write_text("{это не json", encoding="utf-8")
 check("битый файл настроек не мешает работать",
       settings_mod.Settings(settings_path).mode == settings_mod.MODE_BOOK)
 parts_options = settings_mod.Settings(settings_path)
 parts_options.update({"mode": "parts", "parts_hours": "1.5", "drive": "on"})
 check("режим печатается в журнал задания словами",
-      "разбивкой на части" in parts_options.job_line() and "1.5" in parts_options.job_line(),
+      "разбивкой на части" in parts_options.job_line() and "90 мин" in parts_options.job_line(),
       parts_options.job_line())
 whole_options = settings_mod.Settings(settings_path)
 whole_options.update({"mode": "book", "parts_hours": "1.5", "drive": "on"})

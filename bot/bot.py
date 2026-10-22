@@ -1187,10 +1187,10 @@ class App:
         job.meta.update({"status": "splitting", "chain": chain.id,
                          "parts_total": 0, "parts_done": 0, "part_index": 0})
         job.save()
-        job.log_line(f"режим частей: режу книгу на части по {self.settings.parts_hours:g} ч "
+        job.log_line(f"режим частей: режу книгу на части по {self.settings.parts_minutes} мин "
                      f"(в контейнере, машину на это не тратим)")
         self.send_to_job_chat(job, f"✂️ «{job.meta['name']}»: режу на части по "
-                                   f"{self.settings.parts_hours:g} ч. Это минуты — потом части пойдут "
+                                   f"{self.settings.parts_minutes} мин. Это минуты — потом части пойдут "
                                    f"в облако по очереди, а склейка будет здесь.")
         self.in_background(self.owner_chat(), lambda: self.split_chain(chain, job), "Нарезка на части")
 
@@ -2238,11 +2238,13 @@ class App:
         count = max(2, int(-(-hours // limit)))
         job.meta.update({"split": "parts", "hours_estimate": round(hours, 2)})
         job.save()
-        job.log_line(f"книга длинная (≈{hours:.1f} ч звука, порог {limit:g} ч) — режу на части: "
+        job.log_line(f"книга длинная (≈{hours * 60:.0f} мин звука, порог {self.settings.parts_minutes} мин) — "
+                     f"режу на части: "
                      f"так задано в настройках")
         self.send_to_job_chat(
             job,
-            f"✂️ «{job.meta['name']}» длинная: ≈{hours:.1f} ч звука. Режу на части по {limit:g} ч "
+            f"✂️ «{job.meta['name']}» длинная: ≈{hours:.1f} ч звука. Режу на части по "
+            f"{self.settings.parts_minutes} мин "
             f"(≈{count}) — так задано в настройках. Части озвучатся по одной, книга целиком соберётся "
             f"в конце.")
         return False
@@ -2261,7 +2263,7 @@ class App:
         job.log_line("решение: " + ("резать на части" if cut else "одним файлом, без нарезки"))
         self.launch(job)
         if cut:
-            return (f"✂️ «{job.meta['name']}»: режу на части по {self.settings.parts_hours:g} ч — "
+            return (f"✂️ «{job.meta['name']}»: режу на части по {self.settings.parts_minutes} мин — "
                     f"о каждой части напишу.")
         return f"📄 «{job.meta['name']}»: собираю одним файлом, без нарезки — о стадиях напишу."
 
