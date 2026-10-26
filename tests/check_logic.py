@@ -427,6 +427,20 @@ check("после перезапуска задание из очереди ос
 check("время пишется по-русски", webmod.human_delta(90) == "1 мин" and webmod.human_delta(30) == "30 с")
 check("размер пишется по-русски", webmod.human_size(2048).endswith("КБ"))
 
+# Telegram отвечает ошибкой (502/409) мгновенно: опрос не должен возвращаться сразу, иначе главный
+# цикл крутится вхолостую и держит ядро на 100 %, перечитывая задания с диска.
+import tgapi as tgmod          # noqa: E402
+flaky = tgmod.Bot("test")
+flaky.ERROR_PAUSE = 0.3
+def refuse(*args, **kwargs):
+    raise tgmod.TelegramError("getUpdates: Conflict: terminated by other getUpdates request")
+flaky.call = refuse
+moment = time.monotonic()
+for _ in range(3):
+    flaky.updates(0, wait=10)
+check("ошибка Telegram — опрос ждёт, а не крутит цикл вхолостую", time.monotonic() - moment >= 0.85,
+      f"{time.monotonic() - moment:.2f} с на три опроса")
+
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")
 sys.exit(1 if bad else 0)

@@ -125,12 +125,18 @@ class Bot:
         except TelegramError:
             pass
 
+    ERROR_PAUSE = 5                     # опрос не удался — столько ждём, прежде чем вернуться в цикл
+
     def updates(self, offset: int, wait: int = 50):
         try:
             result = self.call("getUpdates", {"offset": offset, "timeout": wait},
                                timeout=wait +
                                30)
         except TelegramError:
+            # Ответ-ошибка (502, 429, 409 — два бота на одном токене при обновлении образа) приходит
+            # мгновенно. Без паузы главный цикл крутился вхолостую: проход за проходом перечитывал
+            # все задания с диска и держал ядро на 100 %, пока Telegram не ответит нормально.
+            time.sleep(min(self.ERROR_PAUSE, max(1, wait)))
             return []
         return result if isinstance(result, list) else []
 

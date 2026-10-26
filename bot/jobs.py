@@ -134,8 +134,13 @@ class Job:
         return max(moments)
 
     def tail(self, limit: int = 3500) -> str:
+        """Последние limit знаков журнала. Читаем только конец файла: журнал части, которую много раз
+        повторяли, дорастает до десятков МБ, а хвост нужен на каждом проходе бота."""
         try:
-            text = self.log.read_text(encoding="utf-8", errors="replace")
+            with self.log.open("rb") as handle:
+                size = handle.seek(0, 2)
+                handle.seek(max(0, size - limit * 4))      # знак UTF-8 — не больше 4 байт
+                text = handle.read().decode("utf-8", errors="replace")
         except OSError:
             return ""
         return text[-limit:]
@@ -485,6 +490,14 @@ class Jobs:
         # любого задания, и проход по цепочкам однажды выдал части статус родителя.
         if not job_id:
             return None
+        # Полный номер — сразу его папка. Перебор всех заданий ради одного стоил дорого: книга на
+        # 51 часть и история за месяц — 24 тыс. чтений meta.json и ~2 с на проход бота.
+        direct = self.jobs_dir / job_id / "meta.json"
+        if "/" not in job_id and job_id not in (".", "..") and direct.is_file():
+            try:
+                return Job(direct.parent)
+            except (OSError, ValueError):
+                pass
         for job in self.load():
             if job.id == job_id or job.id.startswith(job_id) or job.meta["session"] == job_id:
                 return job

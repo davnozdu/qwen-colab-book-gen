@@ -445,11 +445,11 @@ class App:
         её ожидание не держит."""
         machine_waiting = False
         for job in self.queue_order(self.jobs.load()):
-            if not self.jobs.free_slot():
-                break
             machine = self.needs_machine(job)
             if machine and machine_waiting:
-                continue
+                continue                          # до free_slot: он перечитывает все задания
+            if not self.jobs.free_slot():
+                break
             self.launch(job)
             fresh = self.jobs.by_id(job.id)
             if machine and fresh is not None and fresh.status == "queued":
