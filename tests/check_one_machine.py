@@ -187,6 +187,47 @@ local.meta.update({"status": "running", "local": True, "started": time.time()})
 local.save()
 check("местная сборка в контейнере машину не занимает — очередь свободна", wide.free_slot() is True)
 
+# ── 5. очередь к машине — по порядку частей ─────────────────────────────────
+# «Идиот»: часть 16 ждала, пока погаснет чужая машина (повтор проверки — раз в минуту), а очередь шла
+# дальше, и следующая часть проверяла сама: машина погасла — уехала она. Так 26 и 44 обогнали 16.
+app.settings.change(mode="parts")
+app.chains_pass = lambda: None
+chain = app.chains.create(book, "Идиот", CHAT, 0.5)
+members = []
+for index in (1, 2, 3):
+    member = app.jobs.add(f"Идиот — часть {index}", CHAT, book)
+    member.meta.update({"chain": chain.id, "part_index": index, "parts_total": 3})
+    member.save()
+    members.append(member)
+chain.set_parts([{"index": m.meta["part_index"], "job_id": m.id, "epub": str(book), "hours": 0.5}
+                 for m in members])
+first = app.jobs.by_id(members[0].id)
+first.meta.update({"machine_wait": True, "machine_checked": time.time()})   # только что проверяла
+first.save()
+machines[2] = []                                                            # а машина уже погасла
+started.clear()
+app.queue_pass()
+check("первая часть ждёт своей минуты — следующие не уезжают вперёд неё", started == [], str(started))
+first = app.jobs.by_id(members[0].id)
+first.meta["machine_checked"] = time.time() - 120
+first.save()
+app.queue_pass()
+check("подошла минута — запускается именно первая часть", started == [members[0].id], str(started))
+third = app.jobs.by_id(members[2].id)
+app.launch(third)
+check("часть 3 не запускается, пока не готова часть 2 (даже кнопкой)",
+      members[2].id not in started and app.jobs.by_id(members[2].id).status == "queued")
+for member, status in ((members[0], "done"), ):
+    member = app.jobs.by_id(member.id)
+    member.meta["status"] = status
+    member.save()
+chain = app.chains.by_id(chain.id)
+chain.parts[0]["status"] = chains_mod.PART_DONE
+chain.save()
+app.queue_pass()
+check("часть 1 готова — дальше идёт часть 2, а не 3", started[-1:] == [members[1].id], str(started))
+app.settings.change(mode="book")
+
 failed = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)}, не прошло: {len(failed)})")
 sys.exit(1 if failed else 0)

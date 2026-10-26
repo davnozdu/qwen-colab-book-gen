@@ -435,9 +435,25 @@ class App:
                 and not self.machine_busy():
             self.profiles.fit_count()            # число профилей уменьшили на странице
         self.chains_pass()
+        self.queue_pass()
+
+    def queue_pass(self) -> None:
+        """Очередь к машине — строго по порядку. Задание, которое ждёт машину (жива чужая, часть ждёт
+        прежних частей), держит и всех за собой. Раньше очередь шла дальше: первая ждала минуту до
+        новой проверки, а следующая проверяла сама, и стоило старой машине погаснуть — уезжала она.
+        Так у «Идиота» части 26 и 44 озвучились раньше 16-й. Нарезке (в контейнере) машина не нужна —
+        её ожидание не держит."""
+        machine_waiting = False
         for job in self.queue_order(self.jobs.load()):
-            if self.jobs.free_slot():
-                self.launch(job)
+            if not self.jobs.free_slot():
+                break
+            machine = self.needs_machine(job)
+            if machine and machine_waiting:
+                continue
+            self.launch(job)
+            fresh = self.jobs.by_id(job.id)
+            if machine and fresh is not None and fresh.status == "queued":
+                machine_waiting = True
 
     @staticmethod
     def queue_order(jobs) -> list:
@@ -2379,6 +2395,15 @@ class App:
                 return
             self._launch(fresh or job)
 
+    def earlier_parts_pending(self, job) -> bool:
+        """Часть книги — только после всех прежних: готовы ли части с меньшими номерами."""
+        index = int(job.meta.get("part_index") or 0)
+        chain = self.chains.by_id(job.meta.get("chain") or "") if index else None
+        if chain is None:
+            return False
+        return any(int(part.get("index") or 0) < index and part.get("status") != chains.PART_DONE
+                   for part in chain.parts)
+
     def _launch(self, job) -> None:
         book = pathlib.Path(job.meta.get("book") or "")
         if not book.is_file():
@@ -2394,6 +2419,8 @@ class App:
             if owner:
                 job.meta["chat_id"] = owner
                 job.save()
+        if self.earlier_parts_pending(job):
+            return                                # часть ждёт прежних: книга озвучивается по порядку
         try:
             # Одна машина Colab на все аккаунты: живая где-то ещё — гасим; не гаснет — ждём. До всего
             # остального: пока задание ждёт, журнал не засоряется строками о режиме и частях.
