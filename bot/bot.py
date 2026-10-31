@@ -475,14 +475,17 @@ class App:
         self.last_sweep = now
         settings = getattr(self, "settings", None)
         days = settings.keep_days if settings is not None else bot_settings.DEFAULTS["keep_days"]
+        raw_days = (settings.keep_raw_days if settings is not None
+                    else bot_settings.DEFAULTS["keep_raw_days"])
         try:
             done = housekeeping.sweep(DATA, pathlib.Path(TOKEN_FILE).parent.parent, self.jobs,
-                                      self.chains, days, now)
+                                      self.chains, days, now, raw_days)
         except Exception as exc:                 # уборка не должна ронять бота
             print(f"[bot] уборка не удалась: {exc}", flush=True)
             return []
         if done:
-            print(f"[bot] уборка (хранить {days} дн.): " + ", ".join(done), flush=True)
+            print(f"[bot] уборка (хранить {days} дн., сырьё собранных книг {raw_days} дн.): "
+                  + ", ".join(done), flush=True)
         return done
 
     def activity(self, job) -> float:
@@ -1623,6 +1626,7 @@ class App:
                            "parts_total": chain.meta.get("total"), "parts_done": chain.meta.get("total")})
         final.log_line(f"сборка книги из {chain.meta.get('total')} частей: склейка, громкость по всей "
                        f"книге, музыка, m4b и read-along — здесь, в контейнере, без облака")
+        final.log_line(f"звук книги: {bot_settings.STEREO.get(self.settings.stereo, self.settings.stereo)}")
         final.save()
         chain.meta["final_job"] = final.id
         chain.meta["status"] = chains.GLUING
@@ -1631,6 +1635,7 @@ class App:
             self.jobs.start_local(final, glue, ["--mode", "final", "--parts-dir", str(parts_dir),
                                                 "--book", str(chain.meta["book"]),
                                                 "--out", str(self.jobs.results), "--polish", "soft",
+                                                "--stereo", self.settings.stereo,
                                                 "--expect", str(chain.meta.get("total") or 0),
                                                 # имя архива как у файла книги: по абсолютному пути в
                                                 # журнале бот видит, что архив готов
@@ -1659,7 +1664,25 @@ class App:
         if chain is None:
             return "Такой книги с частями уже нет."
         if chain.status == chains.DONE:
-            return f"«{chain.meta.get('name')}» уже собрана — пересобирать нечего."
+            # Собранную книгу можно собрать ЗАНОВО: озвучка и части остаются на месте, заново идут
+            # только склейка, громкость, музыка, звук и m4b. Так меняют настройки звука (стерео),
+            # не платя GPU-часами. Сырьё держим «как корзину» — см. keep_raw_days в настройках.
+            raw = self.parts_dir(chain)
+            if not raw.is_dir() or not any(raw.glob("part-*")):
+                return (f"«{chain.meta.get('name')}» уже собрана, а сырьё убрано (храним "
+                        f"{self.settings.keep_raw_days} дн.). Заново — только новой озвучкой.")
+            job = self.jobs.by_id(chain.meta.get("job") or "")
+            if job is None:
+                job = self.jobs.add(f"{chain.meta.get('name')} — сборка книги",
+                                    chain.meta.get("chat_id") or self.owner_chat(),
+                                    pathlib.Path(chain.meta["book"]))
+                job.meta.update({"chain": chain.id})
+                job.save()
+                chain.meta["job"] = job.id
+            self.start_glue(chain, job)
+            return (f"Пересобираю «{chain.meta.get('name')}» из готовых частей: озвучка не трогается, "
+                    f"заново идут склейка, громкость, музыка, звук "
+                    f"({bot_settings.STEREO.get(self.settings.stereo)}) и m4b.")
         if chain.status == chains.SPLIT:
             return "Сейчас идёт нарезка книги — сборку начнём, когда части будут готовы."
         missing = [str(part["index"]) for part in chain.parts if part.get("status") != chains.PART_DONE]

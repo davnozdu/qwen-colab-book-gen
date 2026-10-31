@@ -17,6 +17,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import time
 import zipfile
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -455,6 +456,59 @@ app.chains_pass()
 check("пересборка не помогла — дальше обычный повтор части (один раз сами)",
       len(local_runs) == 1 and app.jobs.by_id(glue_part.id).status == "queued")
 app.jobs.start_local = real_local
+
+# ── 13. собранную книгу можно собрать заново (только звук) — и с выбранным стерео ──
+import shutil as shutil_mod
+app.jobs.start_local = lambda job_obj, script, arguments: local_runs.append((job_obj.id, str(script), list(arguments)))
+app.settings.change(stereo="space", keep_raw_days=2)
+local_runs.clear()
+done_parent = app.jobs.add("done.epub", CHAT, glue_book_epub)
+done_chain = app.chains.create(glue_book_epub, "Собранная книга", CHAT, 0.5)
+done_chain.meta["job"] = done_parent.id
+done_chain.set_parts([{"index": 1, "total": 1, "title": "Собранная книга — часть 1 из 1",
+                       "epub": str(glue_book_epub), "hours": 0.3}])
+done_chain.parts[0].update({"status": "done"})
+done_chain.meta.update({"status": "done", "finished": time.time()})
+done_chain.save()
+raw_done = app.parts_dir(done_chain) / "part-1"
+raw_done.mkdir(parents=True, exist_ok=True)
+(raw_done / "raw.flac").write_bytes(b"x")
+message = app.glue_chain(done_chain.id)
+args = local_runs[-1][2] if local_runs else []
+check("собранную книгу собирают заново без новой озвучки — с выбранным звуком",
+      "Пересобираю" in message and args and args[args.index("--stereo") + 1] == "space"
+      and local_runs[-1][1].endswith("glue_book.py"), str((message, args)))
+check("и книга снова в сборке, а не «пересобирать нечего»",
+      app.chains.by_id(done_chain.id).status == chains_mod.GLUING)
+
+local_runs.clear()
+gone_parent = app.jobs.add("gone.epub", CHAT, glue_book_epub)
+gone_chain = app.chains.create(glue_book_epub, "Собранная и убранная", CHAT, 0.5)
+gone_chain.meta["job"] = gone_parent.id
+gone_chain.set_parts([{"index": 1, "total": 1, "title": "Собранная и убранная — часть 1 из 1",
+                       "epub": str(glue_book_epub), "hours": 0.3}])
+gone_chain.parts[0].update({"status": "done"})
+gone_chain.meta.update({"status": "done", "finished": time.time()})
+gone_chain.save()
+message = app.glue_chain(gone_chain.id)
+check("сырьё уже убрано — честно сказано, что заново только новой озвучкой",
+      "сырьё убрано" in message and not local_runs, str((message, local_runs)))
+
+# Страница: у собранной книги есть кнопка «собрать заново (только звук)».
+page = webmod.WebApp(app.jobs, launch=app.launch, settings=app.settings, chains=app.chains,
+                     continue_chain=app.continue_chain, glue=app.glue_chain, ask_split=app.ask_split)
+shown_epub = make_epub(work / "shown.epub", 40000)     # своя книга: одна плашка на книгу
+shown_parent = app.jobs.add("shown.epub", CHAT, shown_epub)
+shown_chain = app.chains.create(shown_epub, "Показанная собранная", CHAT, 0.5)
+shown_chain.meta["job"] = shown_parent.id
+shown_chain.set_parts([{"index": 1, "total": 1, "title": "Показанная собранная — часть 1 из 1",
+                        "epub": str(shown_epub), "hours": 0.3}])
+shown_chain.parts[0].update({"status": "done"})
+shown_chain.meta.update({"status": "done", "finished": time.time()})
+shown_chain.save()
+body = page.chains_card()
+check("на странице у собранной книги — «собрать заново (только звук)»",
+      "собрать заново (только звук)" in body and f"/chain/final/{shown_chain.id}" in body)
 
 bad = [name for name, ok in results if not ok]
 print(f"  (проверок: {len(results)})")

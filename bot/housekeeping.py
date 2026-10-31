@@ -32,7 +32,7 @@ import time
 JOB_LOG_LIMIT = 2 * 1024 * 1024        # журнал завершённого задания больше 2 МБ — оставляем последний 1 МБ
 CLI_LOG_LIMIT = 5 * 1024 * 1024        # colab.log больше 5 МБ — оставляем последний 1 МБ
 CLI_LOG_KEEP = 1024 * 1024
-RAW_DONE_DAYS = 1                      # сырьё частей собранной книги
+RAW_DONE_DAYS = 2                      # сырьё частей собранной книги — «корзина» (настройка в админке)
 DAY = 24 * 3600
 
 LIVE_JOBS = {"running", "queued", "choice", "splitting", "waiting", "gluing", "held", "paused", "casting",
@@ -94,10 +94,11 @@ def keep_tail(path: pathlib.Path, limit: int, keep: int) -> bool:
 
 
 def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: float,
-          now: float | None = None) -> list:
+          now: float | None = None, raw_days: float = RAW_DONE_DAYS) -> list:
     """Одна уборка. Возвращает строки «что убрано» (пусто — убирать было нечего)."""
     now = time.time() if now is None else now
     limit = max(1.0, float(keep_days)) * DAY
+    raw_limit = max(0.0, float(raw_days)) * DAY     # сырьё собранной книги — «корзина» на N дней
     data, config = pathlib.Path(data), pathlib.Path(config)
     done = {"заданий": 0, "журналов обрезано": 0, "книг по частям": 0, "сырья частей": 0,
             "архивов": 0, "книг": 0, "файлов CLI": 0, "пакетов голосов": 0,
@@ -167,7 +168,9 @@ def sweep(data: pathlib.Path, config: pathlib.Path, jobs, chains, keep_days: flo
             continue
         if chain.status == "failed":
             in_use.add(pathlib.Path(chain.meta.get("book") or "").name)   # её ещё могут продолжить
-        if chain.status == "done" and raw.exists() and now - moment > RAW_DONE_DAYS * DAY:
+        if chain.status == "done" and raw.exists() and now - moment > raw_limit:
+            # Сырьё собранной книги — как корзина: держим RAW_DONE_DAYS (настройка), чтобы можно было
+            # пересобрать звук (стерео, громкость, музыка) без новой озвучки и без GPU.
             if _remove(raw):
                 done["сырья частей"] += 1
         if chain.status == "replaced" and raw.exists():   # книгу начали заново: старое сырьё не нужно

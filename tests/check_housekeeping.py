@@ -56,12 +56,20 @@ chain_old = chains.create(old_book, "Старая", "1", 1.5)
 chain_old.meta.update({"status": "done", "finished": old})
 chain_old.save()
 (data / "parts" / chain_old.id).mkdir(parents=True)
-chain_done = chains.create(old_book, "Собрана вчера", "1", 1.5)
-chain_done.meta.update({"status": "done", "finished": recent})
+chain_done = chains.create(old_book, "Собрана три дня назад", "1", 1.5)
+chain_done.meta.update({"status": "done", "finished": time.time() - 3 * 86400})
 chain_done.save()
 raw_done = data / "parts" / chain_done.id
 raw_done.mkdir(parents=True)
 (raw_done / "part1.flac").write_bytes(b"x" * 1000)
+
+# Собранная вчера книга: сырьё — как корзина на два дня, его ещё можно пересобрать без озвучки.
+chain_fresh = chains.create(old_book, "Собрана вчера", "1", 1.5)
+chain_fresh.meta.update({"status": "done", "finished": time.time() - 86400})
+chain_fresh.save()
+raw_fresh = data / "parts" / chain_fresh.id
+raw_fresh.mkdir(parents=True)
+(raw_fresh / "part1.flac").write_bytes(b"x" * 1000)
 chain_live = chains.create(live_book, "В работе", "1", 1.5)
 chain_live.meta.update({"status": "running", "created": old})
 chain_live.save()
@@ -104,8 +112,13 @@ check("свежее задание осталось, а его журнал об
 check("задание на паузе не тронуто, даже старое", jobs.by_id(paused.id) is not None)
 check("старая книга по частям удалена вместе с сырьём",
       chains.by_id(chain_old.id) is None and not (data / "parts" / chain_old.id).exists())
-check("у собранной вчера книги сырьё частей убрано, сама книга в списке осталась",
+check("сырьё собранной книги хранится 2 дня по умолчанию, срок — настройка",
+      settings_mod.DEFAULTS["keep_raw_days"] == 2
+      and "сырьё собранной книги 2 дн" in settings_mod.Settings(work / "s.json").summary())
+check("у собранной три дня назад книги сырьё убрано, сама книга в списке осталась",
       chains.by_id(chain_done.id) is not None and not raw_done.exists())
+check("у собранной вчера книги сырьё на месте: книгу ещё можно пересобрать без озвучки",
+      chains.by_id(chain_fresh.id) is not None and raw_fresh.exists())
 check("книга по частям в работе и её сырьё не тронуты", chains.by_id(chain_live.id) is not None and raw_live.exists())
 check("сырьё без книги (сирота) удалено", not orphan.exists())
 check("старый архив удалён, свежий остался", not old_zip.exists() and new_zip.exists())
@@ -115,6 +128,9 @@ check("старая история CLI и отложенный вход удал
       not old_history.exists() and new_history.exists() and not backup.exists())
 check("сам вход профиля не трогается, даже старый", token.exists())
 check("повторная уборка ничего лишнего не находит", housekeeping.sweep(data, config, jobs, chains, 30) == [])
+check("срок 0 дней — сырьё собранной книги убирается сразу",
+      housekeeping.sweep(data, config, jobs, chains, 30, time.time(), 0) is not None
+      and not raw_fresh.exists())
 
 # ── брошенное: «живой» статус, но месяц без движения; остатки нарезки; битые папки ──
 def age_tree(folder, days):

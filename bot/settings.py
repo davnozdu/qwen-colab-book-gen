@@ -23,6 +23,11 @@ MODE_PARTS = "parts"
 MODES = {MODE_BOOK: "одна книга целиком, без нарезки",
          MODE_PARTS: "с разбивкой на части"}
 VOICES = {"one": "один голос (рассказчик)", "multi": "многоголосая: роли через LLM"}
+# Звук готовой книги. Синтез даёт МОНО 24 кГц: настоящего стерео взять неоткуда, поэтому «объём»
+# — это расширение моно эффектом Хааса (два канала, правая сторона на 12 мс позже). Длительность
+# и громкость при этом не меняются, иначе поехали бы подсветка и уровень книги.
+STEREO = {"mono": "моно (как есть)",
+          "space": "стерео-объём (два канала, мягкий Хаас)"}
 # Ударения и ё (стадия stress на машине Colab). Словари — davnozdu/supertonic-dictionaries.
 STRESS = {"silero": "Silero (как раньше)",
           "dictionary": "только словарь Supertonic",
@@ -32,10 +37,12 @@ SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме п
 DEFAULTS = {"mode": MODE_BOOK, "parts_minutes": 60, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
             "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero",
-            "parts_per_profile": 1, "retry_hours": 4.0}
+            "parts_per_profile": 1, "retry_hours": 4.0, "stereo": "mono",
+            "keep_raw_days": 2}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 MINUTES_MIN, MINUTES_MAX = 10, 720     # длина части в минутах звука
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое
+RAW_MIN, RAW_MAX = 0, 60             # сырьё собранной книги — «корзина»: 0 — удалять сразу
 PROFILES_MAX = 10                   # аккаунтов Google Colab, между которыми бот переключается
 PER_PROFILE_MAX = 50                # частей подряд на одном аккаунте; 0 — переключаться только при сбое
 RETRY_MAX = 48.0                    # все аккаунты упали — через столько часов круг заново; 0 — ждать человека
@@ -104,6 +111,15 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
             problems.append(f"пауза, когда упали все аккаунты, — от 0 (ждать вас) до {RETRY_MAX:g} ч")
     except (TypeError, ValueError):
         problems.append("пауза, когда упали все аккаунты, — число часов (например, 4)")
+    raw = values.get("keep_raw_days", DEFAULTS["keep_raw_days"])
+    try:
+        raw_days = int(float(str(raw).replace(",", ".")))
+        if RAW_MIN <= raw_days <= RAW_MAX:
+            clean["keep_raw_days"] = raw_days
+        else:
+            problems.append(f"сырьё собранной книги — от {RAW_MIN} до {RAW_MAX} дней")
+    except (TypeError, ValueError):
+        problems.append("сколько хранить сырьё собранной книги — число дней (например, 2)")
     keep = values.get("keep_days", DEFAULTS["keep_days"])
     try:
         days = int(float(str(keep).replace(",", ".")))
@@ -123,6 +139,11 @@ def parsed(values: dict) -> tuple[dict, list[str]]:
         clean["stress"] = stress
     elif values.get("stress"):
         problems.append(f"неизвестный способ расстановки ударений «{stress}»")
+    stereo = str(values.get("stereo", DEFAULTS["stereo"])).strip()
+    if stereo in STEREO:
+        clean["stereo"] = stereo
+    elif values.get("stereo"):
+        problems.append(f"неизвестный режим звука «{stereo}»")
     provider = str(values.get("llm_provider", DEFAULTS["llm_provider"])).strip()
     if provider in LLM_PROVIDERS:
         clean["llm_provider"] = provider
@@ -227,12 +248,22 @@ class Settings:
         return int(self.values.get("keep_days", DEFAULTS["keep_days"]))
 
     @property
+    def keep_raw_days(self) -> int:
+        """Сколько дней после сборки лежит сырьё книги — чтобы пересобрать звук без новой озвучки."""
+        return int(self.values.get("keep_raw_days", DEFAULTS["keep_raw_days"]))
+
+    @property
     def voices(self) -> str:
         return self.values.get("voices", "one")
 
     @property
     def stress(self) -> str:
         return self.values.get("stress", "silero")
+
+    @property
+    def stereo(self) -> str:
+        """Звук готовой книги: «mono» как есть, «space» — стерео-объём при сборке."""
+        return self.values.get("stereo", "mono")
 
     @property
     def llm_provider(self) -> str:
@@ -267,12 +298,14 @@ class Settings:
                 f"зависание: {f'{self.stall_minutes} мин без движения' if self.stall_minutes else 'не следим'}, "
                 f"профилей Colab: {self.profiles} ({self.rotation_line()}), "
                 f"хранить завершённое {self.keep_days} дн., "
+                f"сырьё собранной книги {self.keep_raw_days} дн., "
                 f"голоса: {VOICES[self.voices]}"
                 + (f" ({self.llm_provider}, {self.llm_model}, ключ {'есть' if self.llm_key else 'НЕТ'})"
                    if self.voices == "multi" else "")
                 + f", ударения: {STRESS[self.stress]}"
                 + (f" ({self.llm_provider}, {self.llm_model}, ключ {'есть' if self.llm_key else 'НЕТ'})"
-                   if self.stress == "arbiter" else ""))
+                   if self.stress == "arbiter" else "")
+                + f", звук: {STEREO[self.stereo]}")
         if self.mode == MODE_BOOK:
             line += " (в этом режиме нарезка не используется)"
         else:

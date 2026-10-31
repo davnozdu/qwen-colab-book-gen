@@ -648,6 +648,13 @@ class WebApp:
                     resume += ('<form class="inline" method="post" action="/chain/final/'
                                + chain.id + '"><button type="submit" title="Склейка, громкость по всей '
                                'книге, музыка и сборка — здесь, в контейнере">собрать книгу</button></form>')
+            else:
+                # Книга собрана, но пока сырьё в томе — звук можно переделать (стерео, громкость,
+                # музыка) и собрать заново БЕЗ новой озвучки. Срок хранения сырья — в настройках.
+                resume += ('<form class="inline" method="post" action="/chain/final/'
+                           + chain.id + '"><button class="ghost" type="submit" '
+                          'onsubmit="" title="Озвучка не трогается: заново идут склейка, громкость, '
+                          'музыка, звук (стерео) и m4b">собрать заново (только звук)</button></form>')
             cards.append(f'<div class="card"><h2>Книга по частям: '
                          f'{html.escape(str(chain.meta.get("name") or ""))}</h2>'
                          f'<div class="muted">{html.escape(chain.summary())} · порог '
@@ -686,6 +693,20 @@ class WebApp:
                 f'<button class="ghost" type="submit" formaction="/llm/models" title="Сохранить настройки и '
                 f'запросить у поставщика список моделей по ключу">считать модели</button></div>{keys}'
                 f'</fieldset>')
+
+    def stereo_fields(self) -> str:
+        """Раздел «Звук книги»: моно как есть или стерео-объём при сборке."""
+        options = "".join(
+            f'<option value="{html.escape(value)}"{" selected" if value == self.settings.stereo else ""}>'
+            f'{html.escape(title)}</option>'
+            for value, title in bot_settings.STEREO.items())
+        return (f'<div class="row" style="margin-top:10px"><label>Звук книги</label> '
+                f'<select name="stereo">{options}</select>'
+                f'<div class="hint">Синтез даёт моно 24 кГц: настоящего стерео взять неоткуда, '
+                f'«объём» — это расширение моно эффектом Хааса (два канала, правая сторона на 12 мс '
+                f'позже). Длительность и громкость книги не меняются, подсветка read-along остаётся '
+                f'на месте. Действует при сборке книги из частей; готовая книга пересобирается без '
+                f'облака.</div></div>')
 
     def stress_fields(self) -> str:
         """Раздел «Голоса и произношение»: один голос или многоголосая, и как ставить ударения и ё."""
@@ -767,6 +788,7 @@ class WebApp:
                 f'<input type="checkbox" name="drive"{" checked" if self.settings.drive else ""}> '
                 f'копировать книгу на Google Drive</label>'
                 f'<div class="hint">только в режиме «одна книга целиком»</div></div>{note}'
+                f'{self.stereo_fields()}'
                 f'</fieldset>'
                 f'{self.stress_fields()}'
                 f'{self.voices_fields()}'
@@ -778,8 +800,13 @@ class WebApp:
                 f'<div class="row"><label>Хранить завершённое</label> '
                 f'<input type="number" name="keep_days" step="1" min="1" max="365" '
                 f'value="{self.settings.keep_days}" style="width:5em"> дн.'
-                f'<div class="hint">старые задания и журналы, книги по частям, архивы и книги удаляются сами; '
-                f'сырьё частей собранной книги — через сутки</div></div>'
+                f'<div class="hint">старые задания и журналы, книги по частям, архивы и книги удаляются сами</div></div>'
+                f'<div class="row"><label>Сырьё собранной книги — держать</label> '
+                f'<input type="number" name="keep_raw_days" step="1" min="{bot_settings.RAW_MIN}" '
+                f'max="{bot_settings.RAW_MAX}" value="{self.settings.keep_raw_days}" style="width:5em"> дн.'
+                f'<div class="hint">как корзина: пока сырьё на месте, звук можно переделать (стерео, '
+                f'громкость, музыка) и собрать книгу заново без новой озвучки и без облака. '
+                f'0 — удалять сразу после сборки</div></div>'
                 f'</fieldset>'
                 f'<button type="submit">Сохранить</button> '
                 f'<span class="hint">Профили Google Colab — на вкладке <a href="/colab">Google Colab</a>.</span>'
