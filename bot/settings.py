@@ -26,8 +26,10 @@ VOICES = {"one": "один голос (рассказчик)", "multi": "мно�
 # Звук готовой книги. Синтез даёт МОНО 24 кГц: настоящего стерео взять неоткуда, поэтому «объём»
 # — это расширение моно эффектом Хааса (два канала, правая сторона на 12 мс позже). Длительность
 # и громкость при этом не меняются, иначе поехали бы подсветка и уровень книги.
-STEREO = {"mono": "моно (как есть)",
-          "space": "стерео-объём (два канала, мягкий Хаас)"}
+# По умолчанию включён «объём»: так решил владелец 31.10.2026 — слушать приятнее, а вернуть моно
+# можно одной настройкой и пересборкой книги без новой озвучки.
+STEREO = {"space": "стерео-объём (два канала, мягкий Хаас)",
+          "mono": "моно (как есть)"}
 # Ударения и ё (стадия stress на машине Colab). Словари — davnozdu/supertonic-dictionaries.
 STRESS = {"silero": "Silero (как раньше)",
           "dictionary": "только словарь Supertonic",
@@ -37,8 +39,8 @@ SECRETS = ("ollama_key", "deepseek_key")      # ключи LLM: в форме п
 DEFAULTS = {"mode": MODE_BOOK, "parts_minutes": 60, "drive": True, "stall_minutes": 30, "profiles": 1,
             "keep_days": 30, "voices": "one", "llm_provider": "ollama", "llm_model": "",
             "ollama_key": "", "deepseek_key": "", "llm_models": {}, "stress": "silero",
-            "parts_per_profile": 1, "retry_hours": 4.0, "stereo": "mono",
-            "keep_raw_days": 2}
+            "parts_per_profile": 1, "retry_hours": 4.0,
+            "keep_raw_days": 2, "stereo": "space"}
 STALL_MIN, STALL_MAX = 5, 600       # сторож зависаний: 0 — не следить
 MINUTES_MIN, MINUTES_MAX = 10, 720     # длина части в минутах звука
 KEEP_MIN, KEEP_MAX = 1, 365          # уборка: сколько дней хранить завершённое

@@ -112,10 +112,14 @@ check("в настройках есть звук книги и срок хран
       'name="stereo"' in settings_tab and 'name="keep_raw_days"' in settings_tab,
       str([name for name in ("stereo", "keep_raw_days") if f'name="{name}"' not in settings_tab]))
 app.settings.change(stereo="space", keep_raw_days=3)
-check("стерео-объём и срок сырья (по умолчанию 2 дн.) сохраняются",
+check("стерео-объём включён по умолчанию; срок сырья — 2 дня по умолчанию",
       app.settings.stereo == "space" and app.settings.keep_raw_days == 3
-      and settings_mod.DEFAULTS["keep_raw_days"] == 2, str(app.settings.values.get("stereo")))
+      and settings_mod.DEFAULTS["keep_raw_days"] == 2
+      and settings_mod.DEFAULTS["stereo"] == "space"
+      and "стерео-объём" in settings_mod.Settings(work / "s.json").summary(),
+      str(app.settings.values.get("stereo")))
 app.settings.change(stereo="mono", keep_raw_days=2)
+check("моно выбирается обратно одной настройкой", app.settings.stereo == "mono")
 app.settings.change(keep_days=90, stall_minutes=45, stress="arbiter")
 code, _, _, headers = post("/settings", {"voices": "multi"})
 check("форма одного поля не сбрасывает остальные настройки",
