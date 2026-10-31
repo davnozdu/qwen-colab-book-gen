@@ -289,6 +289,20 @@ check("сборку без движения 45 мин сторож гасит, �
 check("и пишет предупреждение и что повторяет на том же профиле",
       said(app.bot.sent, "нет движения", "зависла") and said(app.bot.sent, "Повторяю на том же профиле"),
       str(app.bot.sent))
+
+# Сборка книги — не повод гасить: ffmpeg молчит часами по делу, ускоритель при этом не занят.
+book_final = app.jobs.add("book.epub", CHAT, short_book)
+book_final.meta.update({"status": "running", "glue": True, "chain": chains_mod.ID_SAMPLE
+                        if hasattr(chains_mod, "ID_SAMPLE") else "20260101-000000-0000",
+                        "started": old})
+book_final.save()
+book_final.log_line("Громкость по всей книге: мерю роли")
+os.utime(book_final.log, (old, old))
+stopped.clear()
+app.watchdog()
+check("сборку книги сторож не гасит, даже если журнал молчит 45 минут: ускоритель не занят",
+      book_final.id not in stopped and app.jobs.by_id(book_final.id).status == "running",
+      str(stopped))
 hung = app.jobs.by_id(hung.id)
 hung.meta.update({"status": "running", "started": old})
 hung.save()
